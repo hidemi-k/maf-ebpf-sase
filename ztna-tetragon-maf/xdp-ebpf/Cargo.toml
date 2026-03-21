@@ -1,0 +1,10 @@
+[package]
+name = "xdp-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+aya-ebpf = { git = "https://github.com/aya-rs/aya", branch = "main", package = "aya-ebpf" }
+aya-log-ebpf = { git = "https://github.com/aya-rs/aya", branch = "main", package = "aya-log-ebpf" }
+# パケットヘッダ解析用のライブラリを追加
+network-types = "0.0.5"

@@ -1,0 +1,97 @@
+name: sase-lab
+prefix: ""
+
+mgmt:
+  network: clab-mgmt        # docker network 名
+  ipv4-subnet: 172.20.100.0/24
+
+topology:
+  kinds:
+    fdio_vpp:
+      image: git.ipng.ch/ipng/vpp-containerlab:latest
+      startup-config: config/__clabNodeName__/vppcfg.yaml
+      binds:
+        - config/__clabNodeName__/bird-local.conf:/etc/bird/bird-local.conf:ro
+    linux:
+      image: alpine:latest
+  #  vyosnetworks_vyos:
+  #    startup-config: vyos-custom-startup.cfg
+  nodes:
+    linux1:
+      kind: linux
+      image: linux:v1
+      exec:
+        - ip addr add 10.0.1.100/24 dev eth1
+        - ip addr add 10.0.5.100/24 dev eth2
+        - ip route add 172.16.9.0/24 via 10.0.5.1
+        - /usr/sbin/sshd
+    linux2:
+      kind: linux
+      image: linux:v1
+      labels:
+        role: demo-target 
+      exec:
+        - ip addr add 172.16.9.2/24 dev eth1
+        - ip route add 10.0.5.0/24 via 172.16.9.1 dev eth1
+        - ip route add 10.0.1.0/24 via 172.16.9.1 dev eth1
+        - /usr/sbin/sshd
+    kali1:
+      kind: linux
+      image: kali-custom:v1
+      mgmt-ipv4: 172.20.100.150
+      exec:
+        - ip addr add 10.0.1.30/24 dev eth1
+        - ip route add 10.0.5.0/24 via 10.0.1.100 dev eth1
+        - ip route add 172.16.9.0/24 via 10.0.1.100 dev eth1
+    cjunosevo-pe-1:
+      kind: juniper_cjunosevolved
+      mgmt-ipv4: 172.20.100.21
+      image: cjunosevolved:25.4R1.13-EVO
+      startup-config: cjunosevo-pe-1.cfg
+      env:
+        CPTX_COSIM: "BT"
+    srl1:
+      kind: nokia_srlinux
+      image: ghcr.io/nokia/srlinux:latest
+      startup-config: config/srl1/srl.cfg
+      mgmt-ipv4: 172.20.100.41
+    vyos1:
+      kind: vyosnetworks_vyos
+      image: ghcr.io/sever-sever/vyos-container:latest
+    vpp1:
+      kind: fdio_vpp
+      startup-config: config/vpp1/vppcfg.yaml
+      binds:
+        - /run/vpp1:/run/vpp
+    vpp2:
+      kind: fdio_vpp
+      binds:
+        - /run/vpp2:/run/vpp
+    tetragon1:
+      kind: linux
+      image: quay.io/cilium/tetragon:v1.6.0
+      network-mode: host
+      labels:
+        containerlab-privileged: "true"
+      binds:
+        - /sys/fs/bpf:/sys/fs/bpf
+        - /lib/modules:/lib/modules:ro
+        - /usr/src:/usr/src:ro
+        - /sys/kernel/debug:/sys/kernel/debug
+        - /var/run/docker.sock:/var/run/docker.sock
+        - /sys/kernel/btf:/sys/kernel/btf:ro
+        - /etc/tetragon/policies:/etc/tetragon/policies
+      env:
+        TETRAGON_EXPORT_FILENAME: ""
+        TETRAGON_LOG_FORMAT: "json"
+        TETRAGON_LOG_LEVEL: "info"
+        TETRAGON_TRACING_POLICY_DIR: "/etc/tetragon/policies"
+
+  links:
+        - endpoints: ["kali1:eth1", "linux1:eth1"]
+        - endpoints: ["vpp1:eth3", "linux1:eth2"]
+        - endpoints: ["vpp2:eth3", "linux1:eth3"]
+        - endpoints: ["srl1:ethernet-1/1", "linux1:eth4"]
+        - endpoints: ["vyos1:eth1", "linux1:eth5"]
+        - endpoints: ["vpp1:eth2", "vpp2:eth2"]
+        - endpoints: ["vpp1:eth4", "linux2:eth1"]

@@ -1,0 +1,30 @@
+# NETCONF Agent 操作ポリシー
+# このファイルを編集することで、AIが操作できる範囲を制限できます。
+
+# 操作を許可するインターフェース一覧
+allowed_interfaces:
+  - ge-0/0/0
+  - xe-0/0/1
+  - xe-0/0/2
+
+# 操作を許可する VLAN ID の範囲（10〜200）
+# yaml.safe_load 対応: !python タグ不使用、明示的なリストで記載
+allowed_vlan_ids: [10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,
+  26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,
+  48,49,50,60,70,80,90,100,110,120,130,140,150,160,170,180,190,200]
+
+# XML 内に含まれると即ブロックするキーワード
+forbidden_keywords:
+  - delete-config
+  - kill-session
+  - restart
+  - delete system
+  - format
+
+# 許可する NETCONF 設定ノード（<configuration> 直下の要素）
+allowed_netconf_nodes:
+  - vlans
+  - interfaces
+
+# 1回の実行で許可する最大 VLAN 操作数
+max_vlan_operations_per_run: 20

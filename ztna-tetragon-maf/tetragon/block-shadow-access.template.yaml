@@ -1,0 +1,45 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: block-linux2-only-by-nsid
+spec:
+  kprobes:
+  - call: "fd_install"
+    syscall: false
+    args:
+    - index: 1
+      type: "file"
+    selectors:
+    - matchArgs:
+      - index: 1
+        operator: Postfix
+        values:
+        - "sshd_config"       # SSH設定
+        - "authorized_keys"   # SSH鍵（rootもadminも網羅）
+        - "sudoers"           # 権限昇格
+        - "crontab"           # 定期実行
+        - "hosts"             # ネットワーク情報
+        - "resolv.conf"       # DNS情報
+        - "messages"          # システムログ
+        - "interfaces"        # ネットワーク設定
+        - "shadow"            # パスワードハッシュ
+        - "passwd"            # ユーザー名一覧
+        - "os-release"        # OSのバージョン情報
+      # --- SSHの認証とセッションに必要なバイナリを網羅 ---
+      matchBinaries:
+      - operator: NotIn
+        values:
+        - "/bin/sh"
+        - "/usr/bin/sh"
+        - "/bin/bash"
+        - "/usr/sbin/sshd"            # SSH親プロセス
+        - "/usr/lib/ssh/sshd-session" # SSHセッションプロセス
+        - "/usr/lib/ssh/sshd-auth"
+        - "/sbin/ip"    # ← IPアドレス調査用に追加
+        - "/usr/local/bin/runc" # ← 追加：docker execの仲介役
+      matchNamespaces:
+      - namespace: Mnt
+        operator: In
+        values: ["4026532159"]  #確認： sudo ls -l /proc/$(docker inspect --format '{{.State.Pid}}' linux2)/ns/mnt
+      matchActions:
+      - action: Sigkill
