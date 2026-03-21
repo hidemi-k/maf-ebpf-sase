@@ -82,11 +82,11 @@ my-sase-project/
 │       ├── Cargo.toml
 │       └── main.rs
 ├── netconf-rag-maf/                          # NETCONF config generation with RAG + MAF (Jupyter)
-│   └── netconf_rag_agent_framework.ipynb
+│   ├── netconf_rag_agent_framework.ipynb
+│   └── policy.yaml                           # NETCONF operation policy (allowed interfaces, VLANs, forbidden XML ops)
 ├── netmiko-maf/                              # Network automation via Netmiko + MAF (Jupyter)
 │   ├── netmiko_agent_framework.ipynb         # MAF rc5 agent implementation
-│   ├── network_diagnostic_agent_v5.ipynb     # Diagnostic agent (evolution from v1–v5)
-│   └── policy.yaml                           # Declarative operation policy (allowed interfaces, VLANs, forbidden ops)
+│   └── network_diagnostic_agent_v5.ipynb     # Diagnostic agent (evolution from v1–v5)
 ├── README.md
 └── ztna-tetragon-maf/                        # ZTNA module — autonomous blocking (MAF rc5)
     ├── go-control-plane/
@@ -108,9 +108,9 @@ my-sase-project/
 `ztna-tetragon-maf/tetragon/block-shadow-access.template.yaml` is a [Tetragon](https://tetragon.io/) `TracingPolicy` that detects and blocks unauthorized access to `/etc/shadow` and `/etc/passwd` at the kernel level via eBPF.
 When Tetragon fires an event matching this policy, the **admin agent (MAF rc5)** picks it up, reasons about the threat, and instructs the Go control plane to update the XDP drop map in real time — no human intervention required.
 
-### Netmiko operation policy
+### NETCONF operation policy
 
-`netmiko-maf/policy.yaml` declaratively defines what the Netmiko MAF agent is allowed to do — permitted interfaces, VLAN ID ranges, forbidden NETCONF keywords, and max operations per run. Operational constraints can be adjusted here without touching any Python code.
+`netmiko-maf/policy.yaml` is a NETCONF agent policy that declaratively defines the scope of allowed operations — permitted interfaces, VLAN ID ranges, forbidden XML keywords (e.g. `delete-config`, `kill-session`), allowed `<configuration>` nodes, and max VLAN operations per run. Operational constraints can be adjusted here without touching any Python code.
 
 ## 🏁 Getting Started
 
