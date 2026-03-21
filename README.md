@@ -83,10 +83,11 @@ my-sase-project/
 │       └── main.rs
 ├── netconf-rag-maf/                          # NETCONF config generation with RAG + MAF (Jupyter)
 │   ├── netconf_rag_agent_framework.ipynb
-│   └── policy.yaml                           # NETCONF operation policy (allowed interfaces, VLANs, forbidden XML ops)
+│   └── policy.yaml                           # NETCONF agent policy (allowed interfaces, VLANs, forbidden XML ops)
 ├── netmiko-maf/                              # Network automation via Netmiko + MAF (Jupyter)
 │   ├── netmiko_agent_framework.ipynb         # MAF rc5 agent implementation
 │   └── network_diagnostic_agent_v5.ipynb     # Diagnostic agent (evolution from v1–v5)
+├── LICENSE
 ├── README.md
 └── ztna-tetragon-maf/                        # ZTNA module — autonomous blocking (MAF rc5)
     ├── go-control-plane/
@@ -160,4 +161,5 @@ When Tetragon fires an event matching this policy, the **admin agent (MAF rc5)**
     - [`netconf-rag-maf/`](./netconf-rag-maf/) — NETCONF config generation with RAG + MAF orchestration
 
 ## 📄 License
-MIT License
+
+[MIT License](./LICENSE) © 2026 hidemi-k
