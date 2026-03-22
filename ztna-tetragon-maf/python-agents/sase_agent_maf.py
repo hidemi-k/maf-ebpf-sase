@@ -1,3 +1,7 @@
+# Copyright (c) 2026 hidemi-k
+# Licensed under the MIT License.
+# See LICENSE file in the project root for full license information.
+
 """
 SASE Agent - MAF (Microsoft Agent Framework) rc5 移植版
 Groq / llama-3.3-70b-versatile

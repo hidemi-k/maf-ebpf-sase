@@ -1,3 +1,7 @@
+# Copyright (c) 2026 hidemi-k
+# Licensed under the MIT License.
+# See LICENSE file in the project root for full license information.
+
 # XDP Firewall API 仕様書 (v9.1) - FW Edition
 # Flow-Control, QoS, Observability, Auto-Mitigation
 # main.go (FW版) & main.rs (eBPF Kernel-space FW版) 完全仕様リファレンス

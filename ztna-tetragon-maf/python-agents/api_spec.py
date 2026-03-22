@@ -1,3 +1,7 @@
+# Copyright (c) 2026 hidemi-k
+# Licensed under the MIT License.
+# See LICENSE file in the project root for full license information.
+
 # SASE/IBN API 仕様書 (v8.2) - セキュリティ修正版
 # Identity, Priority-Aware QoS, Flow-Control, Ticket-Issuance & Observability
 # main.go (修正版) & main.rs (eBPF Kernel-space) 完全仕様リファレンス
