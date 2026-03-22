@@ -7,11 +7,11 @@ All AI orchestration is unified on **Microsoft Agent Framework (MAF) rc5**. Test
 ## 📺 Demo
 
 ### ZTNA — Autonomous threat blocking (60 sec)
-*Coming soon*
+https://github.com/user-attachments/assets/9774ace3-6f57-48ba-8968-17508a5c07c0
 <!-- Once recorded, drag-and-drop the .mp4 here and GitHub will embed a player automatically -->
 
-### IPS — Human-in-the-loop enforcement (60 sec)
-*Coming soon*
+### IPS — Human-in-the-loop enforcement (53 sec)
+https://github.com/user-attachments/assets/7928db18-4297-4fdc-bc64-0882d5dfc21b
 <!-- Once recorded, drag-and-drop the .mp4 here -->
 
 ## 🏗 Architecture
