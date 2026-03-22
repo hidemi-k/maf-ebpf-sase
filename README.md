@@ -8,11 +8,9 @@ All AI orchestration is unified on **Microsoft Agent Framework (MAF) rc5**. Test
 
 ### ZTNA — Autonomous threat blocking (60 sec)
 https://github.com/user-attachments/assets/9774ace3-6f57-48ba-8968-17508a5c07c0
-<!-- Once recorded, drag-and-drop the .mp4 here and GitHub will embed a player automatically -->
 
 ### IPS — Human-in-the-loop enforcement (53 sec)
 https://github.com/user-attachments/assets/7928db18-4297-4fdc-bc64-0882d5dfc21b
-<!-- Once recorded, drag-and-drop the .mp4 here -->
 
 ## 🏗 Architecture
 
@@ -36,11 +34,11 @@ https://github.com/user-attachments/assets/7928db18-4297-4fdc-bc64-0882d5dfc21b
 
 ## 🚀 Evolution of the Project
 
-Unlike static security tools, this framework was developed through iterative experimentation (documented in the notebooks):
+This framework was developed through iterative experimentation (documented in the notebooks):
 
 - **Phase 1–5**: Evolution from simple log analysis to reactive policy enforcement.
-- **Phase 6**: Task decomposition using DAG (Directed Acyclic Graph) for parallel agent execution.
-- **Phase 7 (Current)**: Full Orchestrator-Worker pattern for robust, auditable security operations.
+- **Phase 6**: Orchestrator decomposes natural language intent into a DAG of tasks and dispatches them to Workers in dependency order.
+- **Phase 7 (Current)**: Four safety boundary layers added to the Orchestrator-Worker pattern — PolicyChecker, ValidationAgent, RollbackOrchestrator, and AuditLogger — for production-grade reliability.
 
 ## 🧠 Why Microsoft Agent Framework (MAF rc5)?
 
@@ -112,6 +110,31 @@ When Tetragon fires an event matching this policy, the **admin agent (MAF rc5)**
 ### NETCONF operation policy
 
 `netmiko-maf/policy.yaml` is a NETCONF agent policy that declaratively defines the scope of allowed operations — permitted interfaces, VLAN ID ranges, forbidden XML keywords (e.g. `delete-config`, `kill-session`), allowed `<configuration>` nodes, and max VLAN operations per run. Operational constraints can be adjusted here without touching any Python code.
+
+## 🔬 Orchestration: RAG + NETCONF + Multi-Layer Diagnostics
+
+This project covers the network operations loop through two Jupyter notebooks.
+
+### [`netconf-rag-maf/`](./netconf-rag-maf/netconf_rag_agent_framework.ipynb) — Permanent remediation via NETCONF × RAG
+
+- **Why RAG?** LLMs do not have reliable knowledge of vendor-specific NETCONF schemas and CLI syntax. RAG injects the relevant device documentation at inference time, enabling accurate XML config generation for Juniper and other vendors.
+- **Why NETCONF?** NETCONF rewrites the router's running configuration directly — enabling intent-based, permanent network changes.
+- **Orchestrator-Worker pattern**: Natural language intent (e.g. *"delete VLAN70 and create VLAN100"*) is decomposed into a DAG of tasks by the Orchestrator, then dispatched to Worker agents in dependency order. Each Worker runs the full `get_inventory → translate → generate → validate → fix → deploy → audit` cycle independently.
+
+### [`netmiko-maf/`](./netmiko-maf/network_diagnostic_agent_v5.ipynb) — Multi-layer fault diagnosis across vendors
+
+A multi-agent diagnostic system for correlating L2 and L3 state across devices. Understanding network faults requires input from multiple layers simultaneously — this notebook provides a 5-agent pipeline for that:
+
+| Agent | Role |
+|---|---|
+| Command selector | Chooses the right command set from symptom description |
+| L2 analyst | Detects interface and MAC-level anomalies |
+| L3 analyst | Identifies routing and ARP issues |
+| Consistency checker | Cross-validates L2/L3 state, applies Self-Correction |
+| Report generator | Produces structured findings with evidence citations |
+
+- **Multi-vendor by design**: `VENDOR_KEY` decouples the SSH driver (`netmiko_driver`) from the command dictionary — adding a new device type requires only a YAML entry, no code changes.
+- **Mock mode**: All agents run against mock data without physical devices, enabling CI/CD-friendly testing.
 
 ## 🏁 Getting Started
 
