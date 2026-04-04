@@ -3,19 +3,19 @@
 # See LICENSE file in the project root for full license information.
 
 """
-SASE Agent - MAF (Microsoft Agent Framework) rc5 移植版
-Groq / llama-3.3-70b-versatile
+SASE Agent - MAF 1.0.0 対応版 (Groq / llama-3.3-70b-versatile)
 
-移植方針:
-  - 手動ツールループ → Agent.run() に委譲
-  - TOOLS JSON スキーマ → @tool デコレータで自動生成
-  - execute_tool() ディスパッチャ → 不要（MAFが自動呼び出し）
-  - history 管理・トークン制限 → MAFセッション管理に委譲
-  - BadRequestError / RateLimitError → MAFのエラーハンドリングに委譲
-  - SaseApiClient, ユーティリティ関数はそのまま流用
+変更点:
+[MAF 1.0.0 対応]
+  1. OpenAI クライアントの import を最新 API に更新
+  旧: agent_framework.openai.OpenAIChatClient
+  新: agent_framework_openai.OpenAIChatCompletionClient
+  Microsoft Agent Framework の API 整理に伴い、正式な名前空間に合わせて import を更新しました。
 
-必要ライブラリ:
-  pip install "agent-framework==1.0.0rc5" --pre requests
+  2. OpenAIChatCompletionClient の初期化引数を最新仕様に合わせて変更
+  旧: model_id=
+  新: model=
+  Microsoft Agent Framework の API 変更に合わせ、クライアント初期化時の引数名を更新しました。
 """
 
 import os
@@ -27,7 +27,7 @@ import random
 import subprocess
 import requests
 from agent_framework import Agent, Message, tool
-from agent_framework.openai import OpenAIChatClient
+from agent_framework_openai import OpenAIChatCompletionClient
 
 # ── 設定 ────────────────────────────────────────────────────────────────────
 GROQ_CONFIG_PATH = os.getenv("SASE_CONFIG", os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../config.ini"))
@@ -112,7 +112,7 @@ def validate_magic_32bit(magic_hex: str) -> bool:
 def create_tools(api: SaseApiClient) -> list:
     """
     @tool デコレータを使いSaseApiClientをバインドしたツール関数リストを返す。
-    MAF rc5 では関数の docstring と型アノテーションからスキーマが自動生成される。
+    MAF では関数の docstring と型アノテーションからスキーマが自動生成される。
     """
     @tool
     def generate_magic_number() -> str:
@@ -293,8 +293,8 @@ def build_agent() -> Agent:
     api = SaseApiClient()
     tools = create_tools(api)
 
-    client = OpenAIChatClient(
-        model_id=MODEL,
+    client = OpenAIChatCompletionClient(
+        model=MODEL,
         api_key=GROQ_API_KEY,
         base_url="https://api.groq.com/openai/v1",
     )
@@ -316,7 +316,7 @@ async def chat_loop(agent: Agent):
 
     os.system("clear")
     print("=" * 60)
-    print("  SASE Agent - MAF rc5 移植版 (Groq / llama-3.3-70b-versatile)")
+    print("  SASE Agent - MAF 1.0.0 対応版 (Groq / llama-3.3-70b-versatile)")
     print("  終了: 'exit' または 'quit'")
     print("=" * 60)
     print()

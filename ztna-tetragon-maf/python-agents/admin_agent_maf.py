@@ -3,33 +3,24 @@
 # See LICENSE file in the project root for full license information.
 
 """
-SASE Admin Agent - MAF rc5 移植版 (Groq / llama-3.1-8b-instant)
+SASE Admin Agent - MAF 1.0.0 対応版 (Groq / llama-3.3-70b-versatile)
 
-変更点 (vs v4):
-  [MAF移植]
-    - AdminNarrator: Groq SDK 直接呼び出し → Agent + OpenAIChatClient に置き換え
+変更点:
+[MAF 1.0.0 対応]
+  1. OpenAI クライアントの import を最新 API に更新
+  旧: agent_framework.openai.OpenAIChatClient
+  新: agent_framework_openai.OpenAIChatCompletionClient
+  Microsoft Agent Framework の API 整理に伴い、正式な名前空間に合わせて import を更新しました。
 
-  [バグ修正]
-    - _is_reauthed() フォールバック判定の修正
-        旧: src_ip が空 かつ identities が空でなければ → 再認証あり（緩すぎ）
-        新: src_ip が空の場合は「再認証不明」として再遮断しない
-        理由: linux2 の IP キャッシュ取得が失敗した場合、
-              sase_agent 側の正規ユーザーが認証しているだけで
-              「再認証あり」と誤判定し、遮断ループが永続してしまう
+  2. OpenAIChatCompletionClient の初期化引数を最新仕様に合わせて変更
+  旧: model_id=
+  新: model=
+  Microsoft Agent Framework の API 変更に合わせ、クライアント初期化時の引数名を更新しました。
 
-  [セキュリティ修正 - Go API修正に対応]
-    - SaseApiClient.invalidate_ticket() を廃止し lock_ticket() に置き換え
-        旧: /auth/ticket?magic=0x0 → 「0チケット発行」になるだけで無効化にならない
-        新: /auth/lock → チケット発行を再起動まで恒久的にロックするAPIを呼び出す
-    - SaseApiClient.get_blacklist() を追加（/auth/blacklist の参照用）
-    - TicketRateMonitor: 大量発行検知時に invalidate_ticket() → lock_ticket() に変更
-    - TetragonMonitor: 再遮断閾値到達時のチケット封鎖を /auth/lock に変更
-    - format_config_state(): 番兵値 (0xffffffffffffffff) を「認証後リセット済み」と表示
-    - AdminNarrator のプロンプトに /auth/lock・ブラックリスト情報を追加
-
-  [変更なし]
-    - SaseApiClient の revoke / stats / priority などの監視ロジック
-    - threading による並列実行構造
+  3. 使用モデルを 8B → 70B に変更
+  旧: llama-3.1-8b-instant
+  新: llama-3.3-70b-versatile
+  応答品質向上のため、より高性能な 70B モデルをデフォルトとして採用しました。
 """
 
 import os
@@ -43,7 +34,7 @@ import configparser
 import requests
 from datetime import datetime, timezone
 from agent_framework import Agent
-from agent_framework.openai import OpenAIChatClient
+from agent_framework_openai import OpenAIChatCompletionClient
 
 # ── 設定 ────────────────────────────────────────────────────────────────────
 GROQ_CONFIG_PATH = os.getenv("SASE_CONFIG", os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../config.ini"))
@@ -57,7 +48,7 @@ if os.path.exists(GROQ_CONFIG_PATH):
 
 SASE_API_URL       = os.getenv("SASE_API_URL", "http://localhost:8080")
 GROQ_API_KEY       = os.getenv("GROQ_API_KEY", groq_api_key)
-MODEL              = "llama-3.1-8b-instant"
+MODEL              = "llama-3.3-70b-versatile"
 TETRAGON_CONTAINER = "tetragon1"
 DATAPLANE_SUBNET   = "10.0.5."
 SIGKILL_THRESHOLD  = 2
@@ -248,9 +239,9 @@ def format_config_state(config_raw: str) -> str:
 # ── MAF: AdminNarrator ────────────────────────────────────────────────────────
 class AdminNarrator:
     """
-    MAF rc5 Agent によるセキュリティイベント解説生成。
+    MAF Agent によるセキュリティイベント解説生成。
     旧実装: Groq SDK 直接呼び出し
-    新実装: Agent + OpenAIChatClient（ツールなし、解説生成専用）
+    新実装: Agent + OpenAIChatCompletionClient（ツールなし、解説生成専用）
     """
 
     SYSTEM_PROMPT = """あなたはSASEネットワークセキュリティシステムの監視AIです。
@@ -270,8 +261,8 @@ class AdminNarrator:
 簡潔に、かつ非技術者にも伝わるように解説してください。"""
 
     def __init__(self):
-        client = OpenAIChatClient(
-            model_id=MODEL,
+        client = OpenAIChatCompletionClient(
+            model=MODEL,
             api_key=GROQ_API_KEY,
             base_url="https://api.groq.com/openai/v1",
         )
@@ -700,7 +691,7 @@ class TetragonMonitor:
 def main():
     os.system("clear")
     print("=" * 60)
-    print("  SASE Admin Agent - MAF rc5 移植版")
+    print("  SASE Admin Agent - MAF 1.0.0 対応版")
     print("  Tetragon監視 ＋ チケットレート監視 → 段階的対応 → 自動遮断 → 管理者向け解説")
     print("=" * 60)
     print()

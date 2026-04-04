@@ -4,19 +4,23 @@
 # See LICENSE file in the project root for full license information.
 
 """
-XDP Firewall Orchestrator - MAF版 (v9.3)
+XDP Firewall Orchestrator - MAF 1.0.0 対応版
 
-変更点 (vs v9.2):
-  [tool_calls 未対応への対処]
-    - MAF の当バージョンでは tools= を渡しても response.tool_calls が返らない
-      → LLM はテキスト内にツール名を書くだけで構造化レスポンスを返さない
-    - tools= の定義は MAF 準拠として維持（LLM へのシグネチャ提示用）
-    - 実行トリガーは [EXEC: ...] テキスト解析に戻す（v9.0方式・実績あり）
-    - 人間確認（はい/いいえ）は維持
+変更点:
+[MAF 1.0.0 対応]
+  1. OpenAI クライアントの import を最新 API に更新
+  旧: agent_framework.openai.OpenAIChatClient
+  新: agent_framework_openai.OpenAIChatCompletionClient
+  Microsoft Agent Framework の API 整理に伴い、正式な名前空間に合わせて import を更新しました。
 
-  [LLM誤判定の修正]
-    - ブロック済み判定: drop_list にある OR dropped_packets > 0 の両方を明示
-    - システムプロンプトでブロックリストの参照方法を明確化
+  2. OpenAIChatCompletionClient の初期化引数を最新仕様に合わせて変更
+  旧: model_id=
+  新: model=
+  Microsoft Agent Framework の API 変更に合わせ、クライアント初期化時の引数名を更新しました。
+
+  3. Message コンストラクタの text= パラメータが削除されて、contents= に変更しました。
+  旧: Message(role="user", text="...")
+  新: Message(role="user", contents=["..."])
 """
 
 import os
@@ -33,7 +37,7 @@ from typing import Any, List, Tuple
 from urllib.parse import urlparse
 
 from agent_framework import Agent, Message
-from agent_framework.openai import OpenAIChatClient
+from agent_framework_openai import OpenAIChatCompletionClient
 
 sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
 
@@ -211,7 +215,7 @@ class FWAnalyst:
     - Agent(tools=FW_TOOLS): LLM がツールシグネチャを認識できる
     - 実際の実行トリガーは response.text 内の [EXEC: ...] タグ
       （MAF 当バージョンで response.tool_calls が返らないため）
-    - Message(role=..., text=...) で会話コンテキストを管理
+    - Message(role=..., contents=["..."]) で会話コンテキストを管理
     - 人間確認（はい/いいえ）は ChatAgent が担当
     """
 
@@ -309,8 +313,8 @@ LLMオーケストレータの役割:
 """
 
     def __init__(self):
-        client = OpenAIChatClient(
-            model_id=MODEL,
+        client = OpenAIChatCompletionClient(
+            model=MODEL,
             api_key=GROQ_API_KEY,
             base_url="https://api.groq.com/openai/v1",
         )
@@ -334,13 +338,13 @@ LLMオーケストレータの役割:
         messages = [
             Message(
                 role="user",
-                text=(
+                contents=[
                     f"【現在のブロック状況】\n{block_list}\n\n"
                     f"【防御効果（前回比 dropped_packets 増加量）】\n"
                     f"{diff_info if diff_info else '（変化なし）'}\n\n"
                     f"【通信統計（最新JSON）】\n{stats_json}\n\n"
                     f"【ユーザーの指示】\n{user_query}"
-                )
+                ]
             )
         ]
         try:
