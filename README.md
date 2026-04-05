@@ -183,6 +183,9 @@ A multi-agent diagnostic system for correlating L2 and L3 state across devices. 
     - [`netmiko-maf/`](./netmiko-maf/) — Network diagnostics and automation with MAF agents
     - [`netconf-rag-maf/`](./netconf-rag-maf/) — NETCONF config generation with RAG + MAF orchestration
 
+> The NETCONF×RAG module is also available as a standalone NiceGUI app:
+> [maf-netconf-rag-gui](https://github.com/hidemi-k/maf-netconf-rag-gui)
+
 ## 📄 License
 
 [MIT License](./LICENSE) © 2026 hidemi-k
