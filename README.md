@@ -121,7 +121,7 @@ This project covers the network operations loop through two Jupyter notebooks.
 - **Why NETCONF?** NETCONF rewrites the router's running configuration directly — enabling intent-based, permanent network changes.
 - **Orchestrator-Worker pattern**: Natural language intent (e.g. *"delete VLAN70 and create VLAN100"*) is decomposed into a DAG of tasks by the Orchestrator, then dispatched to Worker agents in dependency order. Each Worker runs the full `get_inventory → translate → generate → validate → fix → deploy → audit` cycle independently.
 
-### [`netmiko-maf/`](./netmiko-maf/network_diagnostic_agent_v5.ipynb) — Multi-layer fault diagnosis across vendors
+### [`netmiko-maf/`](./netmiko-maf/network_diagnostic_agent.ipynb) — Multi-layer fault diagnosis across vendors
 
 A multi-agent diagnostic system for correlating L2 and L3 state across devices. Understanding network faults requires input from multiple layers simultaneously — this notebook provides a 5-agent pipeline for that:
 
