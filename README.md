@@ -84,7 +84,7 @@ my-sase-project/
 │   └── policy.yaml                           # NETCONF agent policy (allowed interfaces, VLANs, forbidden XML ops)
 ├── netmiko-maf/                              # Network automation via Netmiko + MAF (Jupyter)
 │   ├── netmiko_agent_framework.ipynb         # MAF 1.0.0 agent implementation
-│   └── network_diagnostic_agent_v5.ipynb     # Diagnostic agent (evolution from v1–v5)
+│   └── network_diagnostic_agent.ipynb     # Diagnostic agent
 ├── LICENSE
 ├── README.md
 └── ztna-tetragon-maf/                        # ZTNA module — autonomous blocking (MAF 1.0.0)
