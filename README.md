@@ -22,13 +22,13 @@ https://github.com/user-attachments/assets/7928db18-4297-4fdc-bc64-0882d5dfc21b
   └──────┬──────────────────────────────────┬───────────────┘
          │ stats / events                   │ security events
   ┌──────▼──────────────┐     ┌─────────────▼──────────────────────────┐
-  │  Control Plane (Go) │◄────│         MAF 1.0.0 Orchestration           │
+  │  Control Plane (Go) │◄────│         MAF 1.0.0 Orchestration        │
   │  REST API + XDP map │     │  ┌──────────────┐  ┌────────────────┐  │
   └─────────────────────┘     │  │ Admin agent  │  │  SASE agent    │  │
-                               │  ├──────────────┤  ├────────────────┤  │
+                              │  ├──────────────┤  ├────────────────┤  │
   ┌─────────────────────┐     │  │ Netmiko agent│  │ NETCONF+RAG    │  │
   │  Infra: Containerlab│     │  └──────────────┘  └────────────────┘  │
-  │  VPP + Juniper cRPD │     │         │  Llama-3 via Groq API         │
+  │  VPP + Juniper cRPD │     │         │  Llama-3 via Groq API        │
   └─────────────────────┘     └─────────┴──────────────────────────────┘
 ```
 
@@ -84,7 +84,7 @@ my-sase-project/
 │   └── policy.yaml                           # NETCONF agent policy (allowed interfaces, VLANs, forbidden XML ops)
 ├── netmiko-maf/                              # Network automation via Netmiko + MAF (Jupyter)
 │   ├── netmiko_agent_framework.ipynb         # MAF 1.0.0 agent implementation
-│   └── network_diagnostic_agent.ipynb     # Diagnostic agent
+│   └── network_diagnostic_agent.ipynb        # Diagnostic agent
 ├── LICENSE
 ├── README.md
 └── ztna-tetragon-maf/                        # ZTNA module — autonomous blocking (MAF 1.0.0)
