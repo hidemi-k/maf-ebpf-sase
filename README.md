@@ -2,7 +2,7 @@
 
 > Autonomous threat detection and response: eBPF monitors the kernel, MAF-powered LLM agents decide the action, Go/Rust enforces it at line rate — no human in the loop.
 
-All AI orchestration is unified on **Microsoft Agent Framework (MAF) 1.0.0**. Tested on MAF 1.0.0.
+All AI orchestration is unified on **Microsoft Agent Framework (MAF) 1.1.0**. Tested on MAF 1.1.0.
 
 ## 📺 Demo
 
@@ -22,7 +22,7 @@ https://github.com/user-attachments/assets/7928db18-4297-4fdc-bc64-0882d5dfc21b
   └──────┬──────────────────────────────────┬───────────────┘
          │ stats / events                   │ security events
   ┌──────▼──────────────┐     ┌─────────────▼──────────────────────────┐
-  │  Control Plane (Go) │◄────│         MAF 1.0.0 Orchestration        │
+  │  Control Plane (Go) │◄────│         MAF 1.1.0 Orchestration        │
   │  REST API + XDP map │     │  ┌──────────────┐  ┌────────────────┐  │
   └─────────────────────┘     │  │ Admin agent  │  │  SASE agent    │  │
                               │  ├──────────────┤  ├────────────────┤  │
@@ -40,9 +40,9 @@ This framework was developed through iterative experimentation (documented in th
 - **Phase 6**: Orchestrator decomposes natural language intent into a DAG of tasks and dispatches them to Workers in dependency order.
 - **Phase 7 (Current)**: Four safety boundary layers added to the Orchestrator-Worker pattern — PolicyChecker, ValidationAgent, RollbackOrchestrator, and AuditLogger — for production-grade reliability.
 
-## 🧠 Why Microsoft Agent Framework (MAF 1.0.0)?
+## 🧠 Why Microsoft Agent Framework (MAF 1.1.0)?
 
-All AI orchestration is unified under **MAF 1.0.0** (`agent_framework`). This was a deliberate architectural choice:
+All AI orchestration is unified under **MAF 1.1.0** (`agent_framework`). This was a deliberate architectural choice:
 
 - **Native tool dispatch**: MAF automatically invokes tools from function signatures + docstrings — no manual dispatcher needed.
 - **Session & history management**: Conversation history and token limits are delegated to the MAF session layer.
@@ -55,7 +55,7 @@ The same MAF-based agent pattern is used across all four modules — from low-le
 
 | Layer | Technology |
 |---|---|
-| **AI Orchestration** | Microsoft Agent Framework (MAF) 1.0.0 |
+| **AI Orchestration** | Microsoft Agent Framework (MAF) 1.1.0 |
 | **LLM Backend** | Llama-3 (via Groq API, OpenAI-compatible) |
 | **Data Plane** | Rust + eBPF/XDP — line-rate packet filtering |
 | **Control Plane** | Go — kernel map management & policy REST API |
@@ -69,7 +69,7 @@ my-sase-project/
 ├── infra/
 │   └── containerlab/
 │       └── vpp.clab.yml                      # Containerlab topology definition
-├── ips-maf/                                  # IPS module — human-in-the-loop enforcement (MAF 1.0.0)
+├── ips-maf/                                  # IPS module — human-in-the-loop enforcement (MAF 1.1.0)
 │   ├── go-control-plane/
 │   │   ├── go.mod
 │   │   └── main.go
@@ -83,18 +83,18 @@ my-sase-project/
 │   ├── netconf_rag_agent_framework.ipynb
 │   └── policy.yaml                           # NETCONF agent policy (allowed interfaces, VLANs, forbidden XML ops)
 ├── netmiko-maf/                              # Network automation via Netmiko + MAF (Jupyter)
-│   ├── netmiko_agent_framework.ipynb         # MAF 1.0.0 agent implementation
+│   ├── netmiko_agent_framework.ipynb         # MAF 1.1.0 agent implementation
 │   └── network_diagnostic_agent.ipynb        # Diagnostic agent
 ├── LICENSE
 ├── README.md
-└── ztna-tetragon-maf/                        # ZTNA module — autonomous blocking (MAF 1.0.0)
+└── ztna-tetragon-maf/                        # ZTNA module — autonomous blocking (MAF 1.1.0)
     ├── go-control-plane/
     │   ├── go.mod
     │   └── main.go                           # REST API + XDP map management
     ├── python-agents/
-    │   ├── admin_agent_maf.py                # Security admin agent (MAF 1.0.0)
+    │   ├── admin_agent_maf.py                # Security admin agent (MAF 1.1.0)
     │   ├── api_spec.py
-    │   └── sase_agent_maf.py                 # User-facing SASE agent (MAF 1.0.0)
+    │   └── sase_agent_maf.py                 # User-facing SASE agent (MAF 1.1.0)
     ├── tetragon/
     │   └── block-shadow-access.template.yaml # Tetragon policy: blocks shadow /etc/passwd access
     └── xdp-ebpf/
@@ -105,7 +105,7 @@ my-sase-project/
 ### Tetragon policy
 
 `ztna-tetragon-maf/tetragon/block-shadow-access.template.yaml` is a [Tetragon](https://tetragon.io/) `TracingPolicy` that detects and blocks unauthorized access to `/etc/shadow` and `/etc/passwd` at the kernel level via eBPF.
-When Tetragon fires an event matching this policy, the **admin agent (MAF 1.0.0)** picks it up, reasons about the threat, and instructs the Go control plane to update the XDP drop map in real time — no human intervention required.
+When Tetragon fires an event matching this policy, the **admin agent (MAF 1.1.0)** picks it up, reasons about the threat, and instructs the Go control plane to update the XDP drop map in real time — no human intervention required.
 
 ### NETCONF operation policy
 
@@ -142,7 +142,7 @@ A multi-agent diagnostic system for correlating L2 and L3 state across devices. 
 
 | Tool | Version | Link |
 |---|---|---|
-| Microsoft Agent Framework | 1.0.0 | `pip install agent-framework` |
+| Microsoft Agent Framework | 1.1.0 | `pip install agent-framework` |
 | Groq API Key | — | [console.groq.com](https://console.groq.com) |
 | Go | 1.21+ | [go.dev](https://go.dev/dl/) |
 | Rust + cargo | stable | [rustup.rs](https://rustup.rs) |
@@ -185,6 +185,23 @@ A multi-agent diagnostic system for correlating L2 and L3 state across devices. 
 
 > The NETCONF×RAG module is also available as a standalone NiceGUI app:
 > [maf-netconf-rag-gui](https://github.com/hidemi-k/maf-netconf-rag-gui)
+
+## ⚠️ Known Limitations
+
+### MAF Native HITL: Tool Call Instability with Open Models via Groq
+
+The IPS module (`ips-maf/python-agents/sase_agent.py`) implements human-in-the-loop (HITL)
+using a custom `[EXEC:]` tag parsing approach rather than MAF's native `approval_mode="always_require"` API.
+
+An attempt was made to migrate to the MAF-native HITL, but it was reverted because
+`llama-3.3-70b-versatile` and `openai/gpt-oss-120b` (both via Groq) do not reliably generate
+tool call JSON in this context — they tend to return plain text instead of invoking tools.
+
+MAF's HITL mechanism itself is correctly designed. The limitation lies in the model,
+not in the framework. Using MAF-native HITL requires a model with stable tool calling support
+such as Claude (officially supported by MAF).
+
+See [Issue #2](https://github.com/hidemi-k/maf-ebpf-sase/issues/2) for details and test results.
 
 ## 📄 License
 
