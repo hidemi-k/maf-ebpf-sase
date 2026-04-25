@@ -3,10 +3,10 @@
 # See LICENSE file in the project root for full license information.
 
 """
-SASE Admin Agent - MAF 1.1.0 動作確認済み (Groq / llama-3.3-70b-versatile)
+SASE Admin Agent (Groq / llama-3.3-70b-versatile)
 
 変更点:
-[MAF 1.0.0 対応 / 1.1.0 動作確認済み]
+[初期移行時の変更点]
   1. OpenAI クライアントの import を最新 API に更新
   旧: agent_framework.openai.OpenAIChatClient
   新: agent_framework_openai.OpenAIChatCompletionClient
@@ -691,7 +691,7 @@ class TetragonMonitor:
 def main():
     os.system("clear")
     print("=" * 60)
-    print("  SASE Admin Agent - MAF 1.1.0 動作確認済み")
+    print("  SASE Admin Agent")
     print("  Tetragon監視 ＋ チケットレート監視 → 段階的対応 → 自動遮断 → 管理者向け解説")
     print("=" * 60)
     print()

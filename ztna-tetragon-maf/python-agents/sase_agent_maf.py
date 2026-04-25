@@ -3,10 +3,10 @@
 # See LICENSE file in the project root for full license information.
 
 """
-SASE Agent - MAF 1.1.0 動作確認済み (Groq / llama-3.3-70b-versatile)
+SASE Agent (Groq / llama-3.3-70b-versatile)
 
 変更点:
-[MAF 1.0.0 対応 / 1.1.0 動作確認済み]
+[初期移行時の変更点]
   1. OpenAI クライアントの import を最新 API に更新
   旧: agent_framework.openai.OpenAIChatClient
   新: agent_framework_openai.OpenAIChatCompletionClient
@@ -316,7 +316,7 @@ async def chat_loop(agent: Agent):
 
     os.system("clear")
     print("=" * 60)
-    print("  SASE Agent - MAF 1.1.0 動作確認済み (Groq / llama-3.3-70b-versatile)")
+    print("  SASE Agent (Groq / llama-3.3-70b-versatile)")
     print("  終了: 'exit' または 'quit'")
     print("=" * 60)
     print()

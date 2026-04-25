@@ -4,10 +4,10 @@
 # See LICENSE file in the project root for full license information.
 
 """
-XDP Firewall Orchestrator - MAF 1.1.0 動作確認済み
+XDP Firewall Orchestrator
 
 変更点:
-[MAF 1.0.0 対応 / 1.1.0 動作確認済み]
+[初期移行時の変更点]
   1. OpenAI クライアントの import を最新 API に更新
   旧: agent_framework.openai.OpenAIChatClient
   新: agent_framework_openai.OpenAIChatCompletionClient
