@@ -179,12 +179,11 @@ A multi-agent diagnostic system for correlating L2 and L3 state across devices. 
     ```
 
 5. **Explore the Notebooks**:
-    - [`netmiko-maf/`](./netmiko-maf/) — Network diagnostics and automation with MAF agents
+    - [`netmiko-maf/`](./netmiko-maf/) — Network diagnostics and automation powered by MAF agents
     - [`netconf-rag-maf/`](./netconf-rag-maf/) — NETCONF config generation with RAG + MAF orchestration
 
 > The NETCONF×RAG module is also available as a standalone NiceGUI app:
 > [maf-netconf-rag-gui](https://github.com/hidemi-k/maf-netconf-rag-gui)
-> - Arista cEOS (eAPI/NETCONF/ANTA/XDP-IPS A2A API): `maf-a2a-ceos` (Coming Soon!)
 
 ## ⚠️ Known Limitations
 
