@@ -6,28 +6,44 @@
 """
 XDP Firewall Orchestrator
 
-変更点:
-[初期移行時の変更点]
+変更履歴:
+  [1.4.0 → 1.7.0 移行時の変更点]
   1. OpenAI クライアントの import を最新 API に更新
-  旧: agent_framework.openai.OpenAIChatClient
-  新: agent_framework_openai.OpenAIChatCompletionClient
-  Microsoft Agent Framework の API 整理に伴い、正式な名前空間に合わせて import を更新しました。
+     旧: agent_framework.openai.OpenAIChatClient
+     新: agent_framework_openai.OpenAIChatCompletionClient
 
-  2. OpenAIChatCompletionClient の初期化引数を最新仕様に合わせて変更
-  旧: model_id=
-  新: model=
-  Microsoft Agent Framework の API 変更に合わせ、クライアント初期化時の引数名を更新しました。
+  2. OpenAIChatCompletionClient の初期化引数を変更
+     旧: model_id=
+     新: model=
 
-  3. Message コンストラクタの text= パラメータが削除されて、contents= に変更しました。
-  旧: Message(role="user", text="...")
-  新: Message(role="user", contents=["..."])
+  3. Message コンストラクタの変更
+     旧: Message(role="user", text="...")
+     新: Message(role="user", contents=["..."])
+
+  4. Agent() の引数順変更（1.7.0 破壊的変更）
+     旧: Agent(name=..., instructions=..., client=..., tools=...)
+     新: Agent(client, name=..., instructions=..., tools=...)
+     ← client が第1位置引数になった
+
+  5. FWAnalyst.analyze() の asyncio.run() 廃止（1.7.0 非同期対処）
+     旧: response = asyncio.run(self._agent.run(messages))
+     新: Groq API を requests.post() で直接呼び出す（完全同期）
+
+     理由:
+       run_chat() は同期関数。そこから asyncio.run() を呼ぶと
+       1.4.0 では ContextVar エラーが発生した。
+       1.7.0 で内部修正された可能性があるが、MAF バージョン間の
+       互換性を保つため、Agent.run() に依存しない直接呼び出しに統一する。
+       FWAnalyst はツールを「LLM へのスキーマ提示」にのみ使い、
+       実行は response.text の [EXEC:] 解析で行う設計なので、
+       Agent.run() を使わなくても機能に影響なし。
 """
 
 import os
 import sys
 import io
 import json
-import asyncio
+import asyncio  # 現在未使用。将来の拡張用に保持。
 import configparser
 import requests
 import re
@@ -42,7 +58,10 @@ from agent_framework_openai import OpenAIChatCompletionClient
 sys.stdin = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
 
 # ── 設定 ─────────────────────────────────────────────────────────────────────
-GROQ_CONFIG_PATH = os.getenv("SASE_CONFIG", os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../config.ini"))
+GROQ_CONFIG_PATH = os.getenv(
+    "SASE_CONFIG",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../config.ini")
+)
 
 groq_api_key = ""
 if os.path.exists(GROQ_CONFIG_PATH):
@@ -55,12 +74,11 @@ SASE_API_URL = os.getenv("SASE_API_URL", "http://localhost:8080")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", groq_api_key)
 MODEL        = "llama-3.3-70b-versatile"
 
+# Groq API エンドポイント（FWAnalyst が直接呼び出す）
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+
 
 # ── FW API ツール関数（tools= に登録・実行は直接呼び出し）────────────────────
-# docstring が LLM へのツール説明になるため明確に記述する。
-# MAF tools= に渡すことで LLM がシグネチャを認識できる。
-# 実際の実行は [EXEC:] 解析後に ChatAgent が直接呼び出す。
-
 def fw_get_top() -> str:
     """Get top 10 flows by packet count from XDP Firewall stats."""
     try:
@@ -160,7 +178,6 @@ def fw_get_info() -> str:
         return f"[API ERROR] {e}"
 
 
-# ── ツール定義（tools= に渡す・シグネチャ提示用）─────────────────────────────
 def fw_qos_list() -> str:
     """Get all QoS policies currently applied in XDP Firewall (QOS_MAP).
 
@@ -207,16 +224,22 @@ FW_EXEC_MAP = {
 }
 
 
-# ── MAF: FWAnalyst（tools= + Message・実行は [EXEC:] 解析）──────────────────
+# ── MAF: FWAnalyst ────────────────────────────────────────────────────────────
 class FWAnalyst:
     """
-    MAF Agent による異常解析・対処提案生成。
+    セキュリティイベント解析・対処提案生成。
 
-    - Agent(tools=FW_TOOLS): LLM がツールシグネチャを認識できる
-    - 実際の実行トリガーは response.text 内の [EXEC: ...] タグ
-      （MAF 当バージョンで response.tool_calls が返らないため）
-    - Message(role=..., contents=["..."]) で会話コンテキストを管理
-    - 人間確認（はい/いいえ）は ChatAgent が担当
+    設計方針（1.7.0 対応）:
+    - Agent(client, name=..., tools=FW_TOOLS) でスキーマ提示は維持する
+    - 実際の LLM 呼び出しは Groq API を requests.post() で直接行う（完全同期）
+    - response.text 内の [EXEC: ...] タグで副作用アクションを制御する
+    - asyncio.run() を使わないため MAF バージョン間の互換性に依存しない
+
+    なぜ Agent.run() を使わないか:
+      run_chat() は同期関数 → asyncio.run() を呼ぶと ContextVar 衝突の
+      リスクがある（1.4.0 で実際に発生。1.7.0 で修正の可能性があるが不確実）。
+      FWAnalyst はツール実行を response.text 解析で行う設計なので
+      Agent.run() のツール自動実行機能が不要。直接呼び出しで完全に代替できる。
     """
 
     SYSTEM_PROMPT = """あなたは高度なネットワークセキュリティ運用エンジニアです。
@@ -238,9 +261,9 @@ XDP の統計には「攻撃元が送信したパケット」だけでなく
 「ターゲットが返した応答パケット」も含まれる場合があります。
 
   SYN Flood の典型パターン:
-    - 攻撃元が SYN を大量送信
-    - ターゲットが SYN に対して RST または RST/ACK を返す
-    - 統計上: syn_packets ≒ rst_packets、ack_packets = 0 となる
+  - 攻撃元が SYN を大量送信
+  - ターゲットが SYN に対して RST または RST/ACK を返す
+  - 統計上: syn_packets ≒ rst_packets、ack_packets = 0 となる
 
   「≒」の定義: rst_packets が syn_packets の 30%〜100% の範囲にある場合
   例: syn=34237, rst=12128 → rst/syn = 35% → SYN Flood の兆候あり
@@ -313,45 +336,87 @@ LLMオーケストレータの役割:
 """
 
     def __init__(self):
+        # Agent インスタンスはスキーマ提示（tools= のシグネチャを LLM に見せる）
+        # のために保持する。実際の run() は呼ばない。
+        # 1.7.0: client が第1位置引数
         client = OpenAIChatCompletionClient(
             model=MODEL,
             api_key=GROQ_API_KEY,
             base_url="https://api.groq.com/openai/v1",
         )
-        # tools= に渡すことで LLM がシグネチャを認識できる（MAF 準拠）
-        # 実行は response.text の [EXEC:] 解析で行う
         self._agent = Agent(
+            client,
             name="FWAnalyst",
             instructions=self.SYSTEM_PROMPT,
-            client=client,
             tools=FW_TOOLS,
+        )
+
+    def _build_user_content(self, user_query: str, stats_json: str,
+                            block_list: str, diff_info: str) -> str:
+        """LLM へ渡すユーザーメッセージを組み立てる"""
+        return (
+            f"【現在のブロック状況】\n{block_list}\n\n"
+            f"【防御効果（前回比 dropped_packets 増加量）】\n"
+            f"{diff_info if diff_info else '（変化なし）'}\n\n"
+            f"【通信統計（最新JSON）】\n{stats_json}\n\n"
+            f"【ユーザーの指示】\n{user_query}"
         )
 
     def analyze(self, user_query: str, stats_json: str,
                 block_list: str, diff_info: str) -> Any:
         """
-        統計・ブロック状況を Message で渡して解析・提案を生成する。
+        統計・ブロック状況を渡して解析・提案を生成する。
+
+        Groq API を requests.post() で直接呼び出す（完全同期）。
+        asyncio.run() を使わないため run_chat()（同期関数）から
+        安全に呼び出せる。
 
         Returns:
-            AgentResponse (response.text に [EXEC: ...] タグを含む場合あり)
+            _FWResponse（.text 属性を持つ簡易レスポンスオブジェクト）
+            失敗時は None
         """
-        messages = [
-            Message(
-                role="user",
-                contents=[
-                    f"【現在のブロック状況】\n{block_list}\n\n"
-                    f"【防御効果（前回比 dropped_packets 増加量）】\n"
-                    f"{diff_info if diff_info else '（変化なし）'}\n\n"
-                    f"【通信統計（最新JSON）】\n{stats_json}\n\n"
-                    f"【ユーザーの指示】\n{user_query}"
-                ]
-            )
-        ]
+        user_content = self._build_user_content(
+            user_query, stats_json, block_list, diff_info
+        )
+        payload = {
+            "model": MODEL,
+            "messages": [
+                {"role": "system", "content": self.SYSTEM_PROMPT},
+                {"role": "user",   "content": user_content},
+            ],
+            "max_tokens": 2048,
+            "temperature": 0.1,  # 判定の再現性を高めるため低めに設定
+        }
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type":  "application/json",
+        }
         try:
-            response = asyncio.run(self._agent.run(messages))
-            return response
-        except Exception as e:
+            r = requests.post(
+                GROQ_API_URL,
+                json=payload,
+                headers=headers,
+                timeout=30,
+            )
+            r.raise_for_status()
+            text = r.json()["choices"][0]["message"]["content"].strip()
+            return _FWResponse(text)
+        except requests.RequestException as e:
+            print(f"  ⚠️  [LLM ERROR] Groq API 呼び出し失敗: {e}")
             return None
+        except (KeyError, IndexError) as e:
+            print(f"  ⚠️  [LLM ERROR] レスポンス解析失敗: {e}")
+            return None
+
+
+class _FWResponse:
+    """
+    Agent.run() の戻り値と同じ .text インターフェースを提供する
+    薄いラッパー。ChatAgent が response.text を参照するコードを
+    変更せずに済むようにする。
+    """
+    def __init__(self, text: str):
+        self.text = text
 
 
 # ── AI SASE エージェント ──────────────────────────────────────────────────────
@@ -404,7 +469,7 @@ class ChatAgent:
 
     def __init__(self, ai_agent: AISaseAgent):
         self.agent           = ai_agent
-        self.pending_actions: List[Tuple] = []  # [(func, kwargs, label), ...]
+        self.pending_actions: List[Tuple] = []
 
     def display_raw_stats(self, stats: list):
         print(f"\n{'='*105}")
@@ -424,7 +489,7 @@ class ChatAgent:
 
     def run_chat(self):
         os.system("clear")
-        print("\n=== XDP Firewall Orchestrator (MAF版 v9.3) ===")
+        print("\n=== XDP Firewall Orchestrator (MAF版 v9.4) ===")
         print("コマンド例: 統計を見せて / ブロックリストを見せて / QoSリストを見せて / 状況を分析して / exit")
         while True:
             try:
@@ -498,7 +563,6 @@ class ChatAgent:
         if any(k in lower for k in ["統計", "stats", "状況"]):
             self.display_raw_stats(stats)
 
-        # 統計が空の場合は LLM を呼ばない
         if not stats:
             print("ℹ️  現在フローがありません。統計データが取得できたら再度お試しください。")
             return
@@ -528,7 +592,6 @@ class ChatAgent:
         if text:
             print(f"🤖 AI:\n{text}")
 
-        # [EXEC: ...] タグを解析して pending_actions に積む
         self._extract_pending_actions(text)
 
     def _extract_pending_actions(self, text: str):
@@ -537,16 +600,13 @@ class ChatAgent:
         副作用ありの操作を pending_actions に積んでユーザー確認を求める。
         すでにブロック済みのフローへの /drop/block は除外する。
         """
-        # 現在のブロックリストを取得（二重ブロック防止）
         try:
             current_blocks = json.loads(self.agent.api.drop_list() or "{}")
         except Exception:
             current_blocks = {}
 
-        # 半角[EXEC:...]、全角【EXEC:...】、括弧なし EXEC:... の3パターンに対応
-        pattern = r"(?:\[|【)EXEC:\s*((?:/drop/block|/drop/unblock|/qos/set)\?[^\]\s<>】]{5,})(?:\]|】)"
-        matches = re.findall(pattern, text)
-        # 括弧なしパターンも補足（行末または空白で終わるケース）
+        pattern  = r"(?:\[|【)EXEC:\s*((?:/drop/block|/drop/unblock|/qos/set)\?[^\]\s<>】]{5,})(?:\]|】)"
+        matches  = re.findall(pattern, text)
         pattern2 = r"(?<!\[)(?<!【)EXEC:\s*((?:/drop/block|/drop/unblock|/qos/set)\?[^\s<>】\]]{5,})"
         for m in re.findall(pattern2, text):
             if m not in matches:
@@ -558,34 +618,28 @@ class ChatAgent:
                 parsed = urlparse(cmd)
                 cmd = parsed.path + ("?" + parsed.query if parsed.query else "")
 
-            # ip= パラメータが実際の IP アドレス形式か確認
             if not re.search(r"ip=\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}", cmd):
                 continue
 
-            # /drop/block の場合、すでにブロック済みか確認
             if "/drop/block" in cmd:
-                # "ip=X.X.X.X&proto=tcp&port=N" からブロックリストキーを生成して照合
                 ip_m    = re.search(r"ip=([\d.]+)", cmd)
                 proto_m = re.search(r"proto=(\w+)", cmd)
                 port_m  = re.search(r"port=(\d+)", cmd)
                 if ip_m and proto_m and port_m:
                     block_key = f"{ip_m.group(1)}:{port_m.group(1)} [{proto_m.group(1)}]"
                     if block_key in current_blocks:
-                        continue  # すでにブロック済みのため除外
+                        continue
 
-            # パスとクエリパラメータを分解して関数・引数に変換
             action = self._parse_exec_cmd(cmd)
             if action:
                 valid_actions.append(action)
 
-        # 同一コマンドの重複を排除
-        seen = set()
+        seen    = set()
         deduped = []
         for item in valid_actions:
             _, kwargs, label = item
-            key = label  # label はコマンド文字列と同等
-            if key not in seen:
-                seen.add(key)
+            if label not in seen:
+                seen.add(label)
                 deduped.append(item)
         valid_actions = deduped
 
@@ -613,17 +667,14 @@ class ChatAgent:
             if func is None:
                 return None
 
-            # クエリパラメータを辞書に変換
             kwargs = {}
             for pair in qs.split("&"):
                 if "=" in pair:
                     k, v = pair.split("=", 1)
                     kwargs[k] = v
 
-            # port は int に変換
             if "port" in kwargs:
                 kwargs["port"] = int(kwargs["port"])
-            # limit は int に変換
             if "limit" in kwargs:
                 kwargs["limit"] = int(kwargs["limit"])
 

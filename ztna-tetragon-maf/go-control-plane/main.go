@@ -5,6 +5,7 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"flag"
@@ -14,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,7 +25,25 @@ import (
 	"github.com/cilium/ebpf/rlimit"
 )
 
-// --- 構造体定義 ---
+// ---------------------------------------------------------------------------
+// 定数・設定
+// ---------------------------------------------------------------------------
+
+const (
+	version = "1.1.0"
+
+	// CONFIG_MAP のキー（main.rs と同期すること）
+	cfgKeyMagic    = uint32(0)
+	cfgKeyDuration = uint32(1)
+	cfgKeyPort     = uint32(2)
+
+	defaultAuthDurationNs = uint64(300 * 1_000_000_000) // 300秒
+	defaultAuthPort       = uint16(8888)
+)
+
+// ---------------------------------------------------------------------------
+// 構造体定義（main.rs の #[repr(C)] と ABI を合わせること）
+// ---------------------------------------------------------------------------
 
 type FlowKey struct {
 	Ip       uint32
@@ -72,51 +92,120 @@ type ResponseEntry struct {
 	Stats    IpStats `json:"stats"`
 }
 
+// AuthLog は認証イベントを記録する。
+// Magic フィールドには平文の magic 値を保存しない（マスク済みハッシュのみ）。
 type AuthLog struct {
 	Timestamp time.Time `json:"timestamp"`
 	RemoteIP  string    `json:"remote_ip"`
-	Magic     string    `json:"magic"`
+	MagicHash string    `json:"magic_hash"` // SHA-256 の先頭16文字（平文不保存）
 	Action    string    `json:"action"`
 }
 
+// ---------------------------------------------------------------------------
+// グローバル状態
+// ---------------------------------------------------------------------------
+
 var (
-	authHistory  []AuthLog
-	logMutex     sync.Mutex
+	authHistory []AuthLog
+	logMu       sync.Mutex
+
 	currentIface string
 	currentMode  string
 
-	// チケット発行ロック（/auth/lock で true にすると発行禁止）
-	ticketLocked   bool
-	ticketLockOnce sync.Once // ロック解除は再起動のみ
-	ticketMu       sync.Mutex
+	// チケット発行ロック（/auth/lock で true にすると再起動まで発行禁止）
+	ticketLocked bool
+	ticketMu     sync.Mutex
 
-	// revoke済みIPのブラックリスト（再認証を拒否する）
-	revokeBlacklist   = make(map[uint32]time.Time) // ip -> revoke時刻
-	blacklistMu       sync.RWMutex
-	blacklistDuration = 10 * time.Minute // ブラックリスト保持時間
+	// revoke 済み IP のブラックリスト（ip(uint32) → revoke 時刻）
+	revokeBlacklist = make(map[uint32]time.Time)
+	blacklistMu     sync.RWMutex
+
+	// blacklistDuration は環境変数 BLACKLIST_DURATION_SEC で上書き可能
+	blacklistDuration = mustParseDuration("BLACKLIST_DURATION_SEC", 10*time.Minute)
 )
 
+// mustParseDuration は環境変数から秒数を読み、失定値 d を返す。
+func mustParseDuration(envKey string, d time.Duration) time.Duration {
+	s := os.Getenv(envKey)
+	if s == "" {
+		return d
+	}
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n <= 0 {
+		log.Printf("⚠️  Invalid %s=%q, using default %s", envKey, s, d)
+		return d
+	}
+	return time.Duration(n) * time.Second
+}
+
+// ---------------------------------------------------------------------------
+// 認証ミドルウェア
+// ---------------------------------------------------------------------------
+
+// agentAPIKey は環境変数 AGENT_API_KEY から読む。
+// 空の場合はミドルウェアを無効化し、起動時に警告を出す。
+var agentAPIKey = os.Getenv("AGENT_API_KEY")
+
+// authMiddleware は書き込み系エンドポイントに適用するトークン認証。
+// AGENT_API_KEY が未設定の場合はすべてのリクエストを許可する（開発環境向け）。
+func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if agentAPIKey == "" {
+			next(w, r)
+			return
+		}
+		key := r.Header.Get("X-API-Key")
+		if key != agentAPIKey {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			log.Printf("🔒 Unauthorized API access: remote=%s path=%s", r.RemoteAddr, r.URL.Path)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// magic ハッシュ（ログ記録用）
+// ---------------------------------------------------------------------------
+
+// maskMagic は magic 値を SHA-256 でハッシュし、先頭16文字を返す。
+// 元の magic 値は一切ログに残らない。
+func maskMagic(magic string) string {
+	h := sha256.Sum256([]byte(magic))
+	return fmt.Sprintf("sha256:%x", h[:8]) // 先頭8バイト = 16文字
+}
+
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+
 func main() {
-	ifaceFlag := flag.String("iface", "", "Network interface name (required)")
-	xdpModeFlag := flag.String("xdp-mode", "auto", "XDP mode: native, generic, or auto (default: auto)")
+	ifaceFlag   := flag.String("iface",    "",     "Network interface name (required)")
+	xdpModeFlag := flag.String("xdp-mode", "auto", "XDP mode: native, generic, or auto")
 	flag.Parse()
 
 	if *ifaceFlag == "" {
 		log.Fatal("Usage: sudo ./sase-agent -iface <iface> [-xdp-mode native|generic|auto]")
 	}
 
-	xdpMode := validateXDPMode(*xdpModeFlag)
+	xdpMode   := validateXDPMode(*xdpModeFlag)
 	ifaceName := *ifaceFlag
 	currentIface = ifaceName
-	currentMode = xdpMode
+	currentMode  = xdpMode
 
+	if agentAPIKey == "" {
+		log.Printf("⚠️  AGENT_API_KEY is not set — write APIs are unprotected (dev mode)")
+	} else {
+		log.Printf("✅ API key authentication enabled")
+	}
 	log.Printf("✅ Interface: %s, XDP Mode: %s", ifaceName, xdpMode)
+	log.Printf("✅ Blacklist duration: %s", blacklistDuration)
 
 	if err := rlimit.RemoveMemlock(); err != nil {
 		log.Fatal("failed to remove memlock limit:", err)
 	}
 
-	// eBPF オブジェクトファイルの存在確認
+	// eBPF オブジェクトファイルを探す
 	ebpfPath := "main.elf"
 	if _, err := os.Stat(ebpfPath); err != nil {
 		ebpfPath = "main.o"
@@ -124,17 +213,16 @@ func main() {
 			log.Fatalf("eBPF object file not found (tried main.elf and main.o): %v", err)
 		}
 	}
-
 	log.Printf("✅ Using eBPF object: %s", ebpfPath)
 
 	spec, err := ebpf.LoadCollectionSpec(ebpfPath)
 	if err != nil {
-		log.Fatalf("failed to load collection spec from %s: %v", ebpfPath, err)
+		log.Fatalf("failed to load collection spec: %v", err)
 	}
 
 	coll, err := ebpf.NewCollection(spec)
 	if err != nil {
-		log.Fatalf("failed to create new collection: %v", err)
+		log.Fatalf("failed to create collection: %v", err)
 	}
 	defer coll.Close()
 
@@ -147,383 +235,317 @@ func main() {
 		log.Fatalf("failed to find interface %s: %v", ifaceName, err)
 	}
 
-	// XDP アタッチ
 	l := attachXDPProgram(coll.Programs["xdp_filter"], iface.Index, xdpMode)
 	defer l.Close()
 
-	// マップへの参照取得
-	statsMap := coll.Maps["STATS_MAP"]
-	authIps := coll.Maps["AUTH_IPS"]
-	dropList := coll.Maps["DROP_LIST"]
-	qosMap := coll.Maps["QOS_MAP"]
-	configMap := coll.Maps["CONFIG_MAP"]
+	statsMap      := coll.Maps["STATS_MAP"]
+	authIps       := coll.Maps["AUTH_IPS"]
+	dropList      := coll.Maps["DROP_LIST"]
+	qosMap        := coll.Maps["QOS_MAP"]
+	configMap     := coll.Maps["CONFIG_MAP"]
 	redirectConfig := coll.Maps["REDIRECT_CONFIG"]
 
-	if statsMap == nil || authIps == nil || dropList == nil || qosMap == nil || configMap == nil || redirectConfig == nil {
-		log.Fatal("Failed to load one or more eBPF maps")
+	for name, m := range map[string]*ebpf.Map{
+		"STATS_MAP": statsMap, "AUTH_IPS": authIps,
+		"DROP_LIST": dropList, "QOS_MAP": qosMap,
+		"CONFIG_MAP": configMap, "REDIRECT_CONFIG": redirectConfig,
+	} {
+		if m == nil {
+			log.Fatalf("eBPF map %s not found", name)
+		}
 	}
+	log.Printf("✅ All eBPF maps loaded")
 
-	log.Printf("✅ All eBPF maps loaded successfully")
-
-	// CONFIG_MAP[key=1] に認証有効期限（300秒）を書き込む
-	// main.rs の DEFAULT_AUTH_DURATION = 300 * 1_000_000_000 ns と同値
-	// これにより /config エンドポイントが "auth_duration_ns: 300000000000" を返すようになる
-	durationKey := uint32(1)
-	durationVal := uint64(300 * 1_000_000_000)
-	if err := configMap.Put(&durationKey, &durationVal); err != nil {
-		log.Printf("⚠️  Failed to set CONFIG_MAP[1] (auth_duration): %v", err)
+	// CONFIG_MAP 初期値の書き込み
+	// 注意: Go の const はアドレスを取れないため、ローカル変数にコピーして渡す
+	cfgDurationKey := cfgKeyDuration
+	cfgDurationVal := defaultAuthDurationNs
+	if err := configMap.Put(&cfgDurationKey, &cfgDurationVal); err != nil {
+		log.Printf("⚠️  Failed to set CONFIG_MAP[duration]: %v", err)
 	} else {
 		log.Printf("✅ AUTH duration set: 300s")
 	}
 
-	// xdp0 の ifindex を取得して REDIRECT_CONFIG に入れる
-	xdp0, err := net.InterfaceByName("xdp0")
-	if err != nil {
-		log.Printf("⚠️  xdp0 interface not found: %v (redirect will fallback to XDP_PASS)", err)
+	cfgPortKey := cfgKeyPort
+	authPortVal := uint64(defaultAuthPort)
+	if err := configMap.Put(&cfgPortKey, &authPortVal); err != nil {
+		log.Printf("⚠️  Failed to set CONFIG_MAP[port]: %v", err)
 	} else {
-		redirectCfg := RedirectConfig{
-			Ifindex: uint32(xdp0.Index),
-		}
+		log.Printf("✅ AUTH port set: %d", defaultAuthPort)
+	}
+
+	// xdp0 へのリダイレクト設定
+	if xdp0, err := net.InterfaceByName("xdp0"); err != nil {
+		log.Printf("⚠️  xdp0 not found: %v (redirect → XDP_PASS fallback)", err)
+	} else {
+		cfg := RedirectConfig{Ifindex: uint32(xdp0.Index)}
 		key := uint32(0)
-		if err := redirectConfig.Put(&key, &redirectCfg); err != nil {
+		if err := redirectConfig.Put(&key, &cfg); err != nil {
 			log.Printf("⚠️  Failed to set REDIRECT_CONFIG: %v", err)
 		} else {
-			log.Printf("✅ Redirect target set to xdp0 (ifindex=%d)", xdp0.Index)
+			log.Printf("✅ Redirect target: xdp0 (ifindex=%d)", xdp0.Index)
 		}
 	}
 
-	// 自律防御 ＋ 自動復旧ループ
-	// [不具合修正] 復旧チェックをelse外に移動し、SYNスパイク継続中でも復旧できるようにした
-	go func(sMap *ebpf.Map, aMap *ebpf.Map) {
-		prevSynCounts := make(map[FlowKey]uint64)
-		alertCounts := make(map[FlowKey]int)
-		isolatedAt := make(map[uint32]time.Time)
+	// 自律防御ループ（SYN スパイク検知・格下げ・自動復旧）
+	go runDefenseLoop(statsMap, authIps)
 
-		ticker := time.NewTicker(3 * time.Second)
-		defer ticker.Stop()
+	// API ルート登録
+	// 読み取り系: 認証不要
+	http.HandleFunc("/info",             handleInfo)
+	http.HandleFunc("/stats",            handleGetStats(statsMap))
+	http.HandleFunc("/top",              handleTopStats(statsMap))
+	http.HandleFunc("/config",           handleConfig(configMap))
+	http.HandleFunc("/auth/logs",        handleGetAuthLogs)
+	http.HandleFunc("/auth/identities",  handleGetIdentities(authIps))
+	http.HandleFunc("/auth/blacklist",   handleGetBlacklist)
+	http.HandleFunc("/drop/list",        handleList(dropList))
 
-		for range ticker.C {
-			var key FlowKey
-			var stats IpStats
-			iter := sMap.Iterate()
+	// 書き込み系: authMiddleware で保護
+	http.HandleFunc("/auth/ticket",   authMiddleware(handleIssueTicket(configMap)))
+	http.HandleFunc("/auth/revoke",   authMiddleware(handleClearIdentity(authIps)))
+	http.HandleFunc("/auth/lock",     authMiddleware(handleLockTicket))
+	http.HandleFunc("/auth/priority", authMiddleware(handleSetPriority(authIps, qosMap)))
+	http.HandleFunc("/drop/block",    authMiddleware(handleBlock(dropList)))
+	http.HandleFunc("/drop/unblock",  authMiddleware(handleUnblock(dropList)))
+	http.HandleFunc("/qos/set",       authMiddleware(handleSetQoS(qosMap)))
 
-			for iter.Next(&key, &stats) {
-				currentSyn := stats.SynPackets
-				prevSyn := prevSynCounts[key]
-
-				delta := uint64(0)
-				if currentSyn >= prevSyn {
-					delta = currentSyn - prevSyn
-				} else {
-					delta = currentSyn
-				}
-
-				if delta > 0 {
-					log.Printf("[Debug] IP: %v, Port: %d, Delta: %d", intToIP(key.Ip), key.Port, delta)
-				}
-
-				if delta > 300 {
-					alertCounts[key]++
-					if alertCounts[key] >= 2 {
-						var auth AuthInfo
-						if err := aMap.Lookup(key.Ip, &auth); err == nil && auth.Priority > 1 {
-							auth.Priority = 1
-							aMap.Put(key.Ip, &auth)
-							isolatedAt[key.Ip] = time.Now()
-							log.Printf("[Defense] 🚨 Isolated %s: Persistent SYN Spike on port %d (Delta: %d)", intToIP(key.Ip), key.Port, delta)
-						}
-					}
-				} else {
-					alertCounts[key] = 0
-				}
-
-				// 復旧チェック: deltaの大小に関わらず常に評価する
-				if isoTime, ok := isolatedAt[key.Ip]; ok && time.Since(isoTime) > 1*time.Minute {
-					var auth AuthInfo
-					if err := aMap.Lookup(key.Ip, &auth); err == nil && auth.Priority == 1 {
-						auth.Priority = 2
-						aMap.Put(key.Ip, &auth)
-						delete(isolatedAt, key.Ip)
-						log.Printf("[Recovery] ✅ Restored %s: Traffic stabilized.", intToIP(key.Ip))
-					}
-				}
-
-				prevSynCounts[key] = currentSyn
-			}
-
-			if err := iter.Err(); err != nil {
-				log.Printf("⚠️ Iterator error: %v", err)
-			}
-		}
-	}(statsMap, authIps)
-
-	// --- APIハンドラ登録（main_final.goのパスに統一）---
-	http.HandleFunc("/info", handleInfo)
-	http.HandleFunc("/stats", handleGetStats(statsMap))
-	http.HandleFunc("/top", handleTopStats(statsMap))
-	http.HandleFunc("/config", handleConfig(configMap))
-	http.HandleFunc("/auth/ticket", handleIssueTicket(configMap))
-	http.HandleFunc("/auth/revoke", handleClearIdentity(authIps))
-	http.HandleFunc("/auth/lock", handleLockTicket)
-	http.HandleFunc("/auth/blacklist", handleGetBlacklist)
-	http.HandleFunc("/auth/priority", handleSetPriority(authIps, qosMap))
-	http.HandleFunc("/auth/logs", handleGetAuthLogs)
-	http.HandleFunc("/auth/identities", handleGetIdentities(authIps))
-	http.HandleFunc("/drop/list", handleList(dropList))
-	http.HandleFunc("/drop/block", handleBlock(dropList))
-	http.HandleFunc("/drop/unblock", handleUnblock(dropList))
-	http.HandleFunc("/qos/set", handleSetQoS(qosMap))
-
-	log.Printf("🚀 AIBN Agent running on %s", ifaceName)
-	log.Printf("📊 API Endpoint: http://localhost:8080")
-	log.Printf("📋 Available endpoints:")
-	log.Printf("   GET /info - Get agent info (interface, xdp_mode, version)")
-	log.Printf("   GET /auth/identities - List authenticated sessions")
-	log.Printf("   GET /stats - Get all flow statistics")
-	log.Printf("   GET /top - Get top 10 flows by packet count")
-	log.Printf("   GET /auth/priority?ip=X.X.X.X&level=1|2|3 - Set priority")
-	log.Printf("   GET /auth/revoke?ip=X.X.X.X - Revoke authentication")
-	log.Printf("   GET /qos/set?ip=X.X.X.X&limit=BYTES_PER_SEC - Set QoS limit")
-	log.Printf("   GET /drop/block?ip=X.X.X.X&proto=tcp|udp|icmp&port=PORT - Block flow")
-	log.Printf("   GET /drop/unblock?ip=X.X.X.X&proto=tcp|udp|icmp&port=PORT - Unblock flow")
-	log.Printf("   GET /drop/list - List blocked flows")
-	log.Printf("   GET /auth/ticket?magic=0xHEX - Issue authentication ticket")
-	log.Printf("   GET /auth/lock - Lock ticket issuance (permanent until restart)")
-	log.Printf("   GET /auth/blacklist - List blacklisted IPs")
-	log.Printf("   GET /config - Get kernel state")
-	log.Printf("   GET /auth/logs - Get authentication logs")
+	log.Printf("🚀 AIBN Agent running on interface=%s", ifaceName)
+	log.Printf("📊 API: http://localhost:8080")
+	log.Printf("   [Read]  GET /info /stats /top /config /auth/logs /auth/identities /auth/blacklist /drop/list")
+	log.Printf("   [Write] POST/GET with X-API-Key header: /auth/ticket /auth/revoke /auth/lock /auth/priority /drop/block /drop/unblock /qos/set")
 
 	if err := http.ListenAndServe(":8080", nil); err != nil {
 		log.Fatal(err)
 	}
 }
 
-// validateXDPMode はXDPモードの入力値を検証・正規化する
-func validateXDPMode(xdpMode string) string {
-	xdpMode = strings.ToLower(strings.TrimSpace(xdpMode))
-	switch xdpMode {
-	case "native", "generic", "auto":
-		return xdpMode
-	case "":
-		return "auto"
+// ---------------------------------------------------------------------------
+// 自律防御ループ
+// ---------------------------------------------------------------------------
+
+// runDefenseLoop は 3 秒ごとに STATS_MAP を走査し、
+// SYN スパイク（delta > 300/interval を2回連続検知）で Priority を 1 に格下げ、
+// 1 分後に自動復旧する。
+func runDefenseLoop(sMap *ebpf.Map, aMap *ebpf.Map) {
+	prevSynCounts := make(map[FlowKey]uint64)
+	alertCounts   := make(map[FlowKey]int)
+	isolatedAt    := make(map[uint32]time.Time)
+
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		var key   FlowKey
+		var stats IpStats
+		iter := sMap.Iterate()
+
+		for iter.Next(&key, &stats) {
+			currentSyn := stats.SynPackets
+			prevSyn    := prevSynCounts[key]
+
+			delta := currentSyn - prevSyn
+			if currentSyn < prevSyn {
+				delta = currentSyn // カウンタロールオーバー対策
+			}
+
+			if delta > 300 {
+				alertCounts[key]++
+				if alertCounts[key] >= 2 {
+					var auth AuthInfo
+					if err := aMap.Lookup(key.Ip, &auth); err == nil && auth.Priority > 1 {
+						auth.Priority = 1
+						_ = aMap.Put(key.Ip, &auth)
+						isolatedAt[key.Ip] = time.Now()
+						log.Printf("[Defense] 🚨 Isolated %s port=%d delta=%d",
+							intToIP(key.Ip), key.Port, delta)
+					}
+				}
+			} else {
+				alertCounts[key] = 0
+			}
+
+			// 復旧チェック（delta の大小に関わらず常に評価する）
+			if isoTime, ok := isolatedAt[key.Ip]; ok && time.Since(isoTime) > time.Minute {
+				var auth AuthInfo
+				if err := aMap.Lookup(key.Ip, &auth); err == nil && auth.Priority == 1 {
+					auth.Priority = 2
+					_ = aMap.Put(key.Ip, &auth)
+					delete(isolatedAt, key.Ip)
+					log.Printf("[Recovery] ✅ Restored %s", intToIP(key.Ip))
+				}
+			}
+
+			prevSynCounts[key] = currentSyn
+		}
+
+		if err := iter.Err(); err != nil {
+			log.Printf("⚠️ Iterator error: %v", err)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// XDP アタッチ
+// ---------------------------------------------------------------------------
+
+func validateXDPMode(mode string) string {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	switch mode {
+	case "native", "generic", "auto", "":
+		if mode == "" {
+			return "auto"
+		}
+		return mode
 	default:
-		log.Fatalf("Invalid -xdp-mode: %q. Use native, generic, or auto.", xdpMode)
+		log.Fatalf("Invalid -xdp-mode: %q. Use native, generic, or auto.", mode)
 		return ""
 	}
 }
 
-// attachXDPProgram はXDPプログラムを指定モードでアタッチする
 func attachXDPProgram(prog *ebpf.Program, ifindex int, mode string) link.Link {
-	var l link.Link
-	var err error
+	attach := func(flags link.XDPAttachFlags, label string) (link.Link, error) {
+		return link.AttachXDP(link.XDPOptions{
+			Program:   prog,
+			Interface: ifindex,
+			Flags:     flags,
+		})
+	}
 
 	switch mode {
 	case "native":
-		log.Printf("📌 Attaching XDP in Native/Driver mode...")
-		l, err = link.AttachXDP(link.XDPOptions{
-			Program:   prog,
-			Interface: ifindex,
-			Flags:     link.XDPDriverMode,
-		})
+		l, err := attach(link.XDPDriverMode, "Native")
 		if err != nil {
-			log.Fatalf("❌ Failed to attach XDP in Native mode: %v", err)
+			log.Fatalf("❌ XDP Native attach failed: %v", err)
 		}
-		log.Printf("✅ XDP attached (Native/Driver mode)")
+		log.Printf("✅ XDP attached (Native mode)")
+		return l
 
 	case "generic":
-		log.Printf("📌 Attaching XDP in Generic mode...")
-		l, err = link.AttachXDP(link.XDPOptions{
-			Program:   prog,
-			Interface: ifindex,
-			Flags:     link.XDPGenericMode,
-		})
+		l, err := attach(link.XDPGenericMode, "Generic")
 		if err != nil {
-			log.Fatalf("❌ Failed to attach XDP in Generic mode: %v", err)
+			log.Fatalf("❌ XDP Generic attach failed: %v", err)
 		}
 		log.Printf("✅ XDP attached (Generic mode)")
+		return l
 
-	case "auto":
-		log.Printf("📌 Attaching XDP (Native mode, fallback to Generic)...")
-		l, err = link.AttachXDP(link.XDPOptions{
-			Program:   prog,
-			Interface: ifindex,
-			Flags:     link.XDPDriverMode,
-		})
+	default: // auto
+		l, err := attach(link.XDPDriverMode, "Native")
 		if err != nil {
-			log.Printf("⚠️  Native mode failed, falling back to Generic: %v", err)
-			l, err = link.AttachXDP(link.XDPOptions{
-				Program:   prog,
-				Interface: ifindex,
-				Flags:     link.XDPGenericMode,
-			})
+			log.Printf("⚠️  Native failed, falling back to Generic: %v", err)
+			l, err = attach(link.XDPGenericMode, "Generic")
 			if err != nil {
-				log.Fatalf("❌ Failed to attach XDP (both native and generic): %v", err)
+				log.Fatalf("❌ XDP attach failed (native+generic): %v", err)
 			}
-			log.Printf("✅ XDP attached (Generic mode, fallback)")
-		} else {
-			log.Printf("✅ XDP attached (Native/Driver mode)")
+			log.Printf("✅ XDP attached (Generic fallback)")
+			return l
 		}
+		log.Printf("✅ XDP attached (Native mode)")
+		return l
 	}
-
-	return l
 }
 
-// --- ハンドラ群 ---
+// ---------------------------------------------------------------------------
+// API ハンドラ
+// ---------------------------------------------------------------------------
 
 func handleInfo(w http.ResponseWriter, r *http.Request) {
-	info := map[string]interface{}{
+	writeJSON(w, map[string]interface{}{
 		"interface": currentIface,
 		"xdp_mode":  currentMode,
 		"timestamp": time.Now().Unix(),
-		"version":   "1.0.0",
-		"note":      "VPP determines zero-copy or copy mode automatically via af_xdp based on NIC capabilities",
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(info)
+		"version":   version,
+		"note":      "VPP determines zero-copy or copy mode via af_xdp based on NIC capabilities",
+	})
 }
 
-func handleGetIdentities(m *ebpf.Map) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var (
-			key     uint32
-			val     AuthInfo
-			results = make(map[string]AuthInfo)
-		)
-
-		iter := m.Iterate()
-		for iter.Next(&key, &val) {
-			ipStr := intToIP(key).String()
-			results[ipStr] = val
-		}
-
-		if err := iter.Err(); err != nil {
-			log.Printf("⚠️ Iteration Error: %v", err)
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(results)
-	}
-}
-
-func handleSetPriority(authMap *ebpf.Map, qosMap *ebpf.Map) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query()
-		ipStr, prioStr := q.Get("ip"), q.Get("level")
-		ip := net.ParseIP(ipStr).To4()
-		if ip == nil {
-			http.Error(w, "invalid ip", 400)
-			return
-		}
-
-		var level uint32
-		fmt.Sscanf(prioStr, "%d", &level)
-
-		if level < 1 || level > 3 {
-			http.Error(w, "Invalid level: Use 1(Bulk), 2(Normal), or 3(VIP)", 400)
-			return
-		}
-
-		key := binary.BigEndian.Uint32(ip)
-
-		var auth AuthInfo
-		if err := authMap.Lookup(&key, &auth); err != nil {
-			http.Error(w, "Identity not found.", 404)
-			return
-		}
-		auth.Priority = level
-		authMap.Put(&key, &auth)
-
-		var qos QosConfig
-		if err := qosMap.Lookup(&key, &qos); err == nil {
-			log.Printf("[Slicing] IP %s is now Priority %d (QoS Base Limit: %d B/s)", ipStr, level, qos.LimitBytesPerSec)
-		}
-
-		log.Printf("[EVENT] TYPE=PRIORITY_CHANGE IP=%s LEVEL=%d", ipStr, level)
-
-		fmt.Fprintf(w, "Successfully set %s to Priority %d\n", ipStr, level)
-	}
-}
-
+// handleIssueTicket は magic チケットを CONFIG_MAP[0] に書き込む。
+// magic はログに平文で記録せず、SHA-256 ハッシュ（先頭16文字）のみ保存する。
 func handleIssueTicket(m *ebpf.Map) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		// ロック中は発行拒否
+		// ロック確認
 		ticketMu.Lock()
 		locked := ticketLocked
 		ticketMu.Unlock()
 		if locked {
-			http.Error(w, "Ticket issuance is locked. Restart agent to unlock.", 403)
-			log.Printf("🔒 Ticket issuance rejected (locked): remote=%s", r.RemoteAddr)
+			http.Error(w, "Ticket issuance is locked. Restart agent to unlock.", http.StatusForbidden)
+			log.Printf("🔒 Ticket rejected (locked): remote=%s", r.RemoteAddr)
 			return
 		}
 
+		// magic パース（0x プレフィックスあり・なし両対応）
 		valStr := r.URL.Query().Get("magic")
 		var magic uint64
 		if _, err := fmt.Sscanf(valStr, "0x%x", &magic); err != nil {
 			if _, err2 := fmt.Sscanf(valStr, "%x", &magic); err2 != nil {
-				http.Error(w, "Invalid hex format", 400)
+				http.Error(w, "Invalid hex format", http.StatusBadRequest)
 				return
 			}
 		}
 
-		// magic=0 は禁止（「0チケット発行」による偽無効化を防ぐ）
+		// magic=0 は番兵値のため禁止
 		if magic == 0 {
-			http.Error(w, "magic=0 is reserved and cannot be issued as a ticket", 400)
-			log.Printf("⚠️  Rejected magic=0 ticket request: remote=%s", r.RemoteAddr)
+			http.Error(w, "magic=0 is reserved", http.StatusBadRequest)
+			log.Printf("⚠️  Rejected magic=0: remote=%s", r.RemoteAddr)
 			return
 		}
 
-		// ブラックリスト確認（発行元IPが revoke済みなら拒否）
+		// ブラックリスト確認
 		remoteHost, _, _ := net.SplitHostPort(r.RemoteAddr)
-		remoteIP := net.ParseIP(remoteHost).To4()
-		if remoteIP != nil {
-			remoteKey := binary.BigEndian.Uint32(remoteIP)
+		if remoteIP := net.ParseIP(remoteHost).To4(); remoteIP != nil {
+			key := binary.BigEndian.Uint32(remoteIP)
 			blacklistMu.RLock()
-			revokedAt, inBL := revokeBlacklist[remoteKey]
+			revokedAt, inBL := revokeBlacklist[key]
 			blacklistMu.RUnlock()
 			if inBL && time.Since(revokedAt) < blacklistDuration {
-				http.Error(w, "Source IP is blacklisted", 403)
-				log.Printf("🚫 Ticket rejected (blacklisted IP): remote=%s", r.RemoteAddr)
+				http.Error(w, "Source IP is blacklisted", http.StatusForbidden)
+				log.Printf("🚫 Ticket rejected (blacklisted): remote=%s", r.RemoteAddr)
 				return
 			}
 		}
 
-		key := uint32(0)
-		magicBE := magic
-		m.Put(&key, &magicBE)
+		// CONFIG_MAP[0] に書き込み
+		key := cfgKeyMagic
+		if err := m.Put(&key, &magic); err != nil {
+			http.Error(w, "Failed to write magic", http.StatusInternalServerError)
+			log.Printf("❌ CONFIG_MAP write failed: %v", err)
+			return
+		}
 
-		logMutex.Lock()
+		// ログには magic のハッシュのみ記録（平文を残さない）
+		mh := maskMagic(valStr)
+		logMu.Lock()
 		authHistory = append(authHistory, AuthLog{
 			Timestamp: time.Now(),
 			RemoteIP:  r.RemoteAddr,
-			Magic:     valStr,
+			MagicHash: mh,
 			Action:    "TICKET_ISSUED",
 		})
-		logMutex.Unlock()
+		logMu.Unlock()
 
-		log.Printf("🎫 Ticket Issued: %s", valStr)
-		fmt.Fprintf(w, "Ticket %s active.\n", valStr)
+		log.Printf("🎫 Ticket issued: hash=%s remote=%s", mh, r.RemoteAddr)
+		fmt.Fprintf(w, "Ticket active (hash=%s)\n", mh)
 	}
 }
 
-// handleLockTicket はチケット発行を永続的に禁止する（再起動まで解除不可）
+// handleLockTicket はチケット発行を永続的に禁止する（再起動まで解除不可）。
 func handleLockTicket(w http.ResponseWriter, r *http.Request) {
 	ticketMu.Lock()
 	ticketLocked = true
 	ticketMu.Unlock()
 	log.Printf("🔒 Ticket issuance LOCKED by %s", r.RemoteAddr)
-	fmt.Fprintf(w, "Ticket issuance locked. No new tickets will be accepted until agent restart.\n")
+	fmt.Fprintf(w, "Ticket issuance locked until agent restart.\n")
 }
 
-// handleGetBlacklist はブラックリスト中のIPと残り時間を返す
 func handleGetBlacklist(w http.ResponseWriter, r *http.Request) {
-	blacklistMu.RLock()
-	defer blacklistMu.RUnlock()
-
 	type entry struct {
 		IP        string `json:"ip"`
 		RevokedAt string `json:"revoked_at"`
 		ExpiresIn string `json:"expires_in"`
 	}
+	blacklistMu.RLock()
+	defer blacklistMu.RUnlock()
+
 	now := time.Now()
 	var entries []entry
 	for ipInt, revokedAt := range revokeBlacklist {
@@ -537,16 +559,207 @@ func handleGetBlacklist(w http.ResponseWriter, r *http.Request) {
 			ExpiresIn: remaining.Round(time.Second).String(),
 		})
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(entries)
+	writeJSON(w, entries)
 }
 
+func handleGetAuthLogs(w http.ResponseWriter, r *http.Request) {
+	logMu.Lock()
+	defer logMu.Unlock()
+	writeJSON(w, authHistory)
+}
+
+func handleConfig(m *ebpf.Map) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		// const はアドレスを取れないためローカル変数にコピーする
+		keyMagic    := cfgKeyMagic
+		keyDuration := cfgKeyDuration
+		keyPort     := cfgKeyPort
+		var magic, duration, port uint64
+		_ = m.Lookup(&keyMagic, &magic)
+		_ = m.Lookup(&keyDuration, &duration)
+		_ = m.Lookup(&keyPort, &port)
+
+		// magic の現在値は参照状態のみ返す（値自体は返さない）
+		magicStatus := "unset"
+		switch magic {
+		case 0:
+			magicStatus = "unset"
+		case ^uint64(0): // u64::MAX
+			magicStatus = "consumed"
+		default:
+			magicStatus = "active"
+		}
+
+		writeJSON(w, map[string]interface{}{
+			"magic_status":     magicStatus,
+			"auth_duration_ns": duration,
+			"auth_port":        port & 0xFFFF,
+		})
+	}
+}
+
+func handleClearIdentity(m *ebpf.Map) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ipStr := r.URL.Query().Get("ip")
+		ip    := net.ParseIP(ipStr).To4()
+		if ip == nil {
+			http.Error(w, "invalid ip", http.StatusBadRequest)
+			return
+		}
+		key := binary.BigEndian.Uint32(ip)
+
+		_ = m.Delete(&key)
+
+		blacklistMu.Lock()
+		revokeBlacklist[key] = time.Now()
+		blacklistMu.Unlock()
+
+		logMu.Lock()
+		authHistory = append(authHistory, AuthLog{
+			Timestamp: time.Now(),
+			RemoteIP:  r.RemoteAddr,
+			MagicHash: "-",
+			Action:    "REVOKED_AND_BLACKLISTED:" + ipStr,
+		})
+		logMu.Unlock()
+
+		log.Printf("🚫 Revoked+blacklisted: %s (duration: %s)", ipStr, blacklistDuration)
+		fmt.Fprintf(w, "Revoked and blacklisted: %s (%s)\n", ipStr, blacklistDuration)
+	}
+}
+
+func handleGetIdentities(m *ebpf.Map) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var (
+			key     uint32
+			val     AuthInfo
+			results = make(map[string]AuthInfo)
+		)
+		iter := m.Iterate()
+		for iter.Next(&key, &val) {
+			results[intToIP(key).String()] = val
+		}
+		if err := iter.Err(); err != nil {
+			log.Printf("⚠️ Iteration error: %v", err)
+		}
+		writeJSON(w, results)
+	}
+}
+
+func handleSetPriority(authMap *ebpf.Map, qosMap *ebpf.Map) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		q      := r.URL.Query()
+		ipStr  := q.Get("ip")
+		ip     := net.ParseIP(ipStr).To4()
+		if ip == nil {
+			http.Error(w, "invalid ip", http.StatusBadRequest)
+			return
+		}
+
+		var level uint32
+		fmt.Sscanf(q.Get("level"), "%d", &level)
+		if level < 1 || level > 3 {
+			http.Error(w, "level must be 1(Bulk), 2(Normal), or 3(VIP)", http.StatusBadRequest)
+			return
+		}
+
+		key := binary.BigEndian.Uint32(ip)
+		var auth AuthInfo
+		if err := authMap.Lookup(&key, &auth); err != nil {
+			http.Error(w, "Identity not found", http.StatusNotFound)
+			return
+		}
+		auth.Priority = level
+		_ = authMap.Put(&key, &auth)
+
+		log.Printf("[EVENT] TYPE=PRIORITY_CHANGE IP=%s LEVEL=%d", ipStr, level)
+		fmt.Fprintf(w, "Set %s → Priority %d\n", ipStr, level)
+	}
+}
+
+func handleGetStats(m *ebpf.Map) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		entries := collectStats(m)
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Ip < entries[j].Ip })
+		writeJSON(w, entries)
+	}
+}
+
+func handleTopStats(m *ebpf.Map) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		entries := collectStats(m)
+		sort.Slice(entries, func(i, j int) bool {
+			return entries[i].Stats.Packets > entries[j].Stats.Packets
+		})
+		limit := 10
+		if len(entries) < limit {
+			limit = len(entries)
+		}
+		writeJSON(w, entries[:limit])
+	}
+}
+
+func handleList(m *ebpf.Map) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var key FlowKey
+		var val uint32
+		entries := make(map[string]string)
+		iter := m.Iterate()
+		for iter.Next(&key, &val) {
+			k := fmt.Sprintf("%s:%d [%s]", intToIP(key.Ip), key.Port, getProtoName(key.Protocol))
+			entries[k] = "BLOCKED"
+		}
+		writeJSON(w, entries)
+	}
+}
+
+func handleBlock(m *ebpf.Map) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		key, ipStr, protoStr, port, err := parseFlowParams(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		val := uint32(1)
+		_ = m.Put(&key, &val)
+		fmt.Fprintf(w, "Blocked: %s %s:%d\n", protoStr, ipStr, port)
+	}
+}
+
+func handleUnblock(m *ebpf.Map) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		key, _, _, _, _ := parseFlowParams(r)
+		_ = m.Delete(&key)
+		fmt.Fprintf(w, "Unblocked\n")
+	}
+}
+
+func handleSetQoS(m *ebpf.Map) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		q     := r.URL.Query()
+		ipStr := q.Get("ip")
+		var limit uint64
+		fmt.Sscanf(q.Get("limit"), "%d", &limit)
+		ip := net.ParseIP(ipStr).To4()
+		if ip == nil {
+			http.Error(w, "invalid ip", http.StatusBadRequest)
+			return
+		}
+		key    := binary.BigEndian.Uint32(ip)
+		config := QosConfig{LimitBytesPerSec: limit, Tokens: limit, LastUpdated: 0}
+		_ = m.Put(&key, &config)
+		fmt.Fprintf(w, "QoS applied: %s (%d B/s)\n", ipStr, limit)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// ユーティリティ
+// ---------------------------------------------------------------------------
+
 func collectStats(m *ebpf.Map) []ResponseEntry {
-	var (
-		key     FlowKey
-		val     IpStats
-		entries []ResponseEntry
-	)
+	var key FlowKey
+	var val IpStats
+	var entries []ResponseEntry
 	iter := m.Iterate()
 	for iter.Next(&key, &val) {
 		entries = append(entries, ResponseEntry{
@@ -559,139 +772,10 @@ func collectStats(m *ebpf.Map) []ResponseEntry {
 	return entries
 }
 
-func handleGetAuthLogs(w http.ResponseWriter, r *http.Request) {
-	logMutex.Lock()
-	defer logMutex.Unlock()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(authHistory)
-}
-
-func handleConfig(m *ebpf.Map) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var m0, m1 uint64
-		k0, k1 := uint32(0), uint32(1)
-		m.Lookup(&k0, &m0)
-		m.Lookup(&k1, &m1)
-		results := map[string]interface{}{
-			"current_magic_ticket": fmt.Sprintf("0x%x", m0),
-			"auth_duration_ns":     m1,
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(results)
-	}
-}
-
-func handleClearIdentity(m *ebpf.Map) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		ipStr := r.URL.Query().Get("ip")
-		ip := net.ParseIP(ipStr).To4()
-		if ip == nil {
-			http.Error(w, "invalid ip", 400)
-			return
-		}
-		key := binary.BigEndian.Uint32(ip)
-
-		// AUTH_IPS から削除
-		m.Delete(&key)
-
-		// ブラックリストに追加（blacklistDuration の間、再認証を拒否）
-		blacklistMu.Lock()
-		revokeBlacklist[key] = time.Now()
-		blacklistMu.Unlock()
-
-		logMutex.Lock()
-		authHistory = append(authHistory, AuthLog{
-			Timestamp: time.Now(),
-			RemoteIP:  r.RemoteAddr,
-			Magic:     "-",
-			Action:    "REVOKED_AND_BLACKLISTED:" + ipStr,
-		})
-		logMutex.Unlock()
-
-		log.Printf("🚫 Revoked and blacklisted: %s (duration: %s)", ipStr, blacklistDuration)
-		fmt.Fprintf(w, "Revoked and blacklisted: %s (for %s)\n", ipStr, blacklistDuration)
-	}
-}
-
-func handleGetStats(m *ebpf.Map) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		entries := collectStats(m)
-		sort.Slice(entries, func(i, j int) bool { return entries[i].Ip < entries[j].Ip })
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(entries)
-	}
-}
-
-func handleTopStats(m *ebpf.Map) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		entries := collectStats(m)
-		sort.Slice(entries, func(i, j int) bool { return entries[i].Stats.Packets > entries[j].Stats.Packets })
-		limit := 10
-		if len(entries) < limit {
-			limit = len(entries)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(entries[:limit])
-	}
-}
-
-func handleList(m *ebpf.Map) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		var key FlowKey
-		var val uint32
-		entries := make(map[string]string)
-		iter := m.Iterate()
-		for iter.Next(&key, &val) {
-			ipStr := intToIP(key.Ip).String()
-			entryKey := fmt.Sprintf("%s:%d [%s]", ipStr, key.Port, getProtoName(key.Protocol))
-			entries[entryKey] = "BLOCKED"
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(entries)
-	}
-}
-
-func handleBlock(m *ebpf.Map) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		key, ipStr, protoStr, port, err := parseFlowParams(r)
-		if err != nil {
-			http.Error(w, err.Error(), 400)
-			return
-		}
-		val := uint32(1)
-		m.Put(&key, &val)
-		fmt.Fprintf(w, "Blocked: %s %s:%d\n", protoStr, ipStr, port)
-	}
-}
-
-func handleUnblock(m *ebpf.Map) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		key, _, _, _, _ := parseFlowParams(r)
-		m.Delete(&key)
-		fmt.Fprintf(w, "Unblocked\n")
-	}
-}
-
-func handleSetQoS(m *ebpf.Map) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		q := r.URL.Query()
-		ipStr := q.Get("ip")
-		var limit uint64
-		fmt.Sscanf(q.Get("limit"), "%d", &limit)
-		ip := net.ParseIP(ipStr).To4()
-		if ip != nil {
-			key := binary.BigEndian.Uint32(ip)
-			config := QosConfig{LimitBytesPerSec: limit, Tokens: limit, LastUpdated: 0}
-			m.Put(&key, &config)
-			fmt.Fprintf(w, "QoS Applied: %s (%d B/s)\n", ipStr, limit)
-		}
-	}
-}
-
 func parseFlowParams(r *http.Request) (FlowKey, string, string, uint16, error) {
-	q := r.URL.Query()
+	q                       := r.URL.Query()
 	ipStr, protoStr, portStr := q.Get("ip"), q.Get("proto"), q.Get("port")
-	ip := net.ParseIP(ipStr).To4()
+	ip                      := net.ParseIP(ipStr).To4()
 	if ip == nil {
 		return FlowKey{}, "", "", 0, fmt.Errorf("invalid ip")
 	}
@@ -699,16 +783,15 @@ func parseFlowParams(r *http.Request) (FlowKey, string, string, uint16, error) {
 	switch protoStr {
 	case "icmp":
 		proto = 1
-	case "tcp":
-		proto = 6
 	case "udp":
 		proto = 17
-	default:
+	default: // tcp
 		proto = 6
+		protoStr = "tcp"
 	}
 	var port uint16
 	fmt.Sscanf(portStr, "%d", &port)
-	key := FlowKey{Ip: binary.BigEndian.Uint32(ip), Port: port, Protocol: proto, Pad: 0}
+	key := FlowKey{Ip: binary.BigEndian.Uint32(ip), Port: port, Protocol: proto}
 	return key, ipStr, protoStr, port, nil
 }
 
@@ -729,4 +812,9 @@ func intToIP(nn uint32) net.IP {
 	ip := make(net.IP, 4)
 	binary.BigEndian.PutUint32(ip, nn)
 	return ip
+}
+
+func writeJSON(w http.ResponseWriter, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(v)
 }

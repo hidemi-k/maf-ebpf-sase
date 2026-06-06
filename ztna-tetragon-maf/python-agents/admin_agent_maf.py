@@ -5,39 +5,52 @@
 """
 SASE Admin Agent (Groq / llama-3.3-70b-versatile)
 
-変更点:
-[初期移行時の変更点]
+変更履歴:
+  [v9.0 対応]
+  1. 書き込み系 API に X-API-Key ヘッダ認証を追加
+     AGENT_API_KEY 環境変数が設定されている場合、/auth/revoke, /auth/lock,
+     /auth/priority, /drop/block 等に X-API-Key ヘッダを付与する。
+
+  2. /config レスポンス変更に対応
+     旧: current_magic_ticket (hex 文字列), auth_duration_ns
+     新: magic_status ("active"/"consumed"/"unset"), auth_duration_ns, auth_port
+     format_config_state() を magic_status ベースに書き直し。
+
+  3. /auth/logs の magic フィールド廃止に対応
+     旧: magic フィールドに平文 hex 値
+     新: magic_hash フィールドに "sha256:XXXXXXXXXXXXXXXX" 形式
+     extract_auth_history() と AdminNarrator のプロンプト生成を修正。
+     TicketRateMonitor の除外フィルタを magic → magic_hash ベースに変更。
+
+  [初期移行時の変更点]
   1. OpenAI クライアントの import を最新 API に更新
-  旧: agent_framework.openai.OpenAIChatClient
-  新: agent_framework_openai.OpenAIChatCompletionClient
-  Microsoft Agent Framework の API 整理に伴い、正式な名前空間に合わせて import を更新しました。
-
-  2. OpenAIChatCompletionClient の初期化引数を最新仕様に合わせて変更
-  旧: model_id=
-  新: model=
-  Microsoft Agent Framework の API 変更に合わせ、クライアント初期化時の引数名を更新しました。
-
+  2. model_id= → model=
   3. 使用モデルを 8B → 70B に変更
-  旧: llama-3.1-8b-instant
-  新: llama-3.3-70b-versatile
-  応答品質向上のため、より高性能な 70B モデルをデフォルトとして採用しました。
 """
 
 import os
+import re
 import sys
 import json
 import time
-import asyncio
+import asyncio  # 現在 admin_agent_maf では未使用。将来の拡張用に保持。
 import threading
 import subprocess
 import configparser
 import requests
 from datetime import datetime, timezone
-from agent_framework import Agent
-from agent_framework_openai import OpenAIChatCompletionClient
+# agent_framework は TetragonMonitor・TicketRateMonitor では使用しない。
+# AdminNarrator は Groq API を requests で直接呼び出す実装に変更済み
+# （asyncio.run() による ContextVar 衝突を回避するため）。
+# MAF の import は将来の拡張のために保持するが、現時点では使用しない。
+# from agent_framework import Agent
+# from agent_framework_openai import OpenAIChatCompletionClient
 
 # ── 設定 ────────────────────────────────────────────────────────────────────
-GROQ_CONFIG_PATH = os.getenv("SASE_CONFIG", os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../config.ini"))
+GROQ_CONFIG_PATH = os.getenv(
+    "SASE_CONFIG",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../config.ini")
+)
 
 groq_api_key = ""
 if os.path.exists(GROQ_CONFIG_PATH):
@@ -46,8 +59,9 @@ if os.path.exists(GROQ_CONFIG_PATH):
     if 'GROQ' in config and 'GROQ_API_KEY' in config['GROQ']:
         groq_api_key = config['GROQ']['GROQ_API_KEY'].strip()
 
-SASE_API_URL       = os.getenv("SASE_API_URL", "http://localhost:8080")
-GROQ_API_KEY       = os.getenv("GROQ_API_KEY", groq_api_key)
+SASE_API_URL       = os.getenv("SASE_API_URL",   "http://localhost:8080")
+GROQ_API_KEY       = os.getenv("GROQ_API_KEY",   groq_api_key)
+AGENT_API_KEY      = os.getenv("AGENT_API_KEY",  "")  # 書き込み系 API の認証キー
 MODEL              = "llama-3.3-70b-versatile"
 TETRAGON_CONTAINER = "tetragon1"
 DATAPLANE_SUBNET   = "10.0.5."
@@ -61,12 +75,24 @@ RATE_POLL_INTERVAL = 10
 
 # ── SASE API クライアント ─────────────────────────────────────────────────────
 class SaseApiClient:
-    def __init__(self, base_url: str = SASE_API_URL):
-        self.base = base_url.rstrip("/")
+    def __init__(self, base_url: str = SASE_API_URL, api_key: str = AGENT_API_KEY):
+        self.base    = base_url.rstrip("/")
+        self.api_key = api_key
 
-    def _get(self, path: str, params: dict = None) -> str:
+    def _headers(self, write: bool = False) -> dict:
+        h = {}
+        if write and self.api_key:
+            h["X-API-Key"] = self.api_key
+        return h
+
+    def _get(self, path: str, params: dict = None, write: bool = False) -> str:
         try:
-            r = requests.get(f"{self.base}{path}", params=params, timeout=5)
+            r = requests.get(
+                f"{self.base}{path}",
+                params=params,
+                headers=self._headers(write),
+                timeout=5
+            )
             r.raise_for_status()
             try:
                 return json.dumps(r.json(), ensure_ascii=False, indent=2)
@@ -79,45 +105,42 @@ class SaseApiClient:
         return self._get("/auth/identities")
 
     def revoke(self, ip: str) -> str:
-        return self._get("/auth/revoke", {"ip": ip})
+        return self._get("/auth/revoke", {"ip": ip}, write=True)
 
     def get_stats(self) -> str:
         return self._get("/stats")
 
     def get_logs(self) -> str:
+        """v9.0: magic フィールドは廃止、magic_hash フィールドを使用する"""
         return self._get("/auth/logs")
 
     def get_config(self) -> str:
+        """v9.0: magic_status, auth_duration_ns, auth_port を返す"""
         return self._get("/config")
 
     def set_priority(self, ip: str, level: int) -> str:
-        return self._get("/auth/priority", {"ip": ip, "level": level})
+        return self._get("/auth/priority", {"ip": ip, "level": level}, write=True)
 
     def lock_ticket(self) -> str:
-        """
-        チケット発行を恒久ロックする（再起動まで解除不可）。
-        旧実装の invalidate_ticket() は /auth/ticket?magic=0x0 を呼び出していたが、
-        これは「0x0 チケットを発行するだけ」であり無効化にならなかった。
-        Go API の /auth/lock エンドポイント追加に伴い置き換え。
-        """
-        return self._get("/auth/lock")
+        """チケット発行を恒久ロックする（再起動まで解除不可）"""
+        return self._get("/auth/lock", write=True)
 
     def get_blacklist(self) -> str:
-        """revoke 済みIPのブラックリスト一覧を取得（/auth/blacklist）"""
         return self._get("/auth/blacklist")
 
     def drop_block(self, ip: str, proto: str, port: int) -> str:
-        return self._get("/drop/block", {"ip": ip, "proto": proto, "port": port})
+        return self._get("/drop/block", {"ip": ip, "proto": proto, "port": port}, write=True)
 
     def drop_unblock(self, ip: str, proto: str, port: int) -> str:
-        return self._get("/drop/unblock", {"ip": ip, "proto": proto, "port": port})
+        return self._get("/drop/unblock", {"ip": ip, "proto": proto, "port": port}, write=True)
 
     def revoke_by_stats(self) -> list:
+        """現在認証中の全IPを優先度降格 → revoke する"""
         try:
-            stats = json.loads(self.get_stats())
+            stats      = json.loads(self.get_stats())
             active_ips = list({e["ip"] for e in stats if isinstance(e, dict) and "ip" in e})
         except Exception as e:
-            return [{"error": f"stats取得失敗: {e}"}]
+            return [{"error": f"stats 取得失敗: {e}"}]
 
         results = []
         for ip in active_ips:
@@ -146,7 +169,6 @@ def get_container_name_by_docker_id(docker_id_partial: str) -> str:
 
 
 def build_ip_cache(subnet_prefix: str = DATAPLANE_SUBNET) -> dict:
-    import re
     cache = {}
     try:
         result = subprocess.run(
@@ -179,8 +201,6 @@ def build_ip_cache(subnet_prefix: str = DATAPLANE_SUBNET) -> dict:
 
 def get_dataplane_ip(container_name: str, subnet_prefix: str = DATAPLANE_SUBNET,
                      cache: dict = None) -> str:
-    import re
-
     if cache and container_name in cache:
         return cache[container_name]
 
@@ -206,6 +226,10 @@ def now_str() -> str:
 
 
 def extract_auth_history(logs_raw: str, src_ip: str) -> list:
+    """
+    直近5件の認証ログを返す。
+    v9.0: magic フィールドは廃止され magic_hash フィールドになっている。
+    """
     try:
         logs = json.loads(logs_raw)
         if not isinstance(logs, list):
@@ -216,32 +240,45 @@ def extract_auth_history(logs_raw: str, src_ip: str) -> list:
 
 
 def format_config_state(config_raw: str) -> str:
+    """
+    /config レスポンスを人間向けに整形する。
+    v9.0 対応: magic_status フィールド（"active"/"consumed"/"unset"）を使用する。
+    旧フィールド current_magic_ticket は廃止済み。
+    """
     try:
-        cfg     = json.loads(config_raw)
-        ticket  = cfg.get("current_magic_ticket", "不明")
-        dur_ns  = cfg.get("auth_duration_ns", 0)
-        dur_sec = int(dur_ns) // 1_000_000_000
-        # 0x0        : 未発行
-        # 0xffffffff...（u64::MAX）: 認証成功後のリセット済み番兵値（再利用不可）
-        # それ以外   : 有効なチケットが待機中
-        SENTINEL = "0xffffffffffffffff"
-        if ticket in ("0x0", "0", "", "不明"):
-            status = "未発行（0x0）"
-        elif ticket.lower() == SENTINEL:
-            status = "リセット済み（認証後番兵値・再発行待ち）"
-        else:
-            status = f"有効（{ticket}）"
-        return f"チケット状態: {status} / 認証有効期限: {dur_sec}秒"
+        cfg        = json.loads(config_raw)
+        status_key = cfg.get("magic_status", "unset")
+        dur_ns     = cfg.get("auth_duration_ns", 0)
+        auth_port  = cfg.get("auth_port", 8888)
+        dur_sec    = int(dur_ns) // 1_000_000_000
+
+        status_label = {
+            "active":   "有効（認証待ち）",
+            "consumed": "リセット済み（認証後番兵値・再発行待ち）",
+            "unset":    "未発行",
+        }.get(status_key, f"不明 ({status_key})")
+
+        return (f"チケット状態: {status_label} / "
+                f"認証有効期限: {dur_sec}秒 / "
+                f"認証ポート: UDP:{auth_port}")
     except Exception:
-        return f"config取得結果: {config_raw}"
+        return f"config 取得結果: {config_raw}"
 
 
-# ── MAF: AdminNarrator ────────────────────────────────────────────────────────
+# ── AdminNarrator ─────────────────────────────────────────────────────────────
 class AdminNarrator:
     """
-    MAF Agent によるセキュリティイベント解説生成。
-    旧実装: Groq SDK 直接呼び出し
-    新実装: Agent + OpenAIChatCompletionClient（ツールなし、解説生成専用）
+    Groq API への直接 HTTP 呼び出しによるセキュリティイベント解説生成。
+
+    【なぜ MAF Agent を使わないか】
+    TetragonMonitor._handle_sigkill_event() は通常スレッド（非 async）から呼ばれる。
+    MAF 1.4.0 の Agent.run() は内部で asyncio の ContextVar を使っており、
+    asyncio.run() で別コンテキストを作ると
+    「ContextVar was created in a different Context」エラーになる。
+
+    MAF 1.7.0 との互換性がないため agent framework は 1.4.0 固定。
+    この制約下では「Groq API を requests で直接叩く完全同期実装」が
+    最もシンプルで安全な解法。
     """
 
     SYSTEM_PROMPT = """あなたはSASEネットワークセキュリティシステムの監視AIです。
@@ -257,34 +294,32 @@ class AdminNarrator:
 - /auth/lock が呼ばれるとエージェント再起動まで新規チケット発行が不可能になります
 - revoke されたIPはブラックリストに登録され、一定期間は /auth/ticket 経由の再認証も拒否されます
 - チケット状態が「リセット済み（番兵値）」の場合は正常な認証後の状態です
+- v9.0 以降、認証ログの magic 値はハッシュ（sha256:...）として記録されます
 
 簡潔に、かつ非技術者にも伝わるように解説してください。"""
 
+    GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+
     def __init__(self):
-        client = OpenAIChatCompletionClient(
-            model=MODEL,
-            api_key=GROQ_API_KEY,
-            base_url="https://api.groq.com/openai/v1",
-        )
-        self._agent = Agent(
-            name="AdminNarrator",
-            instructions=self.SYSTEM_PROMPT,
-            client=client,
-        )
+        if not GROQ_API_KEY:
+            raise RuntimeError("GROQ_API_KEY が設定されていません")
 
     def narrate(self, event_summary: dict) -> str:
-        """イベントサマリーを受け取り、管理者向け解説を生成する（同期ラッパー）"""
-
+        """
+        イベントサマリーを受け取り、管理者向け解説を生成する。
+        Groq API を requests で直接呼び出す（完全同期・asyncio 不使用）。
+        """
+        # v9.0: magic_hash フィールドを使用する
         auth_log_lines = ""
         for entry in event_summary.get("auth_logs", []):
-            ts     = entry.get("timestamp", "")
-            magic  = entry.get("magic", "")
-            action = entry.get("action", "")
-            auth_log_lines += f"  [{ts}] {action} magic={magic}\n"
+            ts         = entry.get("timestamp", "")
+            magic_hash = entry.get("magic_hash", entry.get("magic", ""))
+            action     = entry.get("action", "")
+            auth_log_lines += f"  [{ts}] {action} magic_hash={magic_hash}\n"
         if not auth_log_lines:
             auth_log_lines = "  （ログなし）"
 
-        prompt = f"""以下のセキュリティイベントが発生しました。管理者向けに状況を解説してください。
+        user_prompt = f"""以下のセキュリティイベントが発生しました。管理者向けに状況を解説してください。
 
 【検知情報】
 - 攻撃元コンテナ: {event_summary.get('container_name', '不明')}
@@ -300,17 +335,37 @@ class AdminNarrator:
 - チケット発行ロック: {event_summary.get('lock_result', '未実施')}
 - ブラックリスト状態: {event_summary.get('blacklist_state', '未取得')}
 
-【直近の認証ログ（チケット発行履歴）】
+【直近の認証ログ（チケット発行履歴）※magic値はセキュリティのためハッシュ表示】
 {auth_log_lines}
 【遮断後のカーネルチケット状態】
 {event_summary.get('config_state', '取得失敗')}
 """
+        payload = {
+            "model": MODEL,
+            "messages": [
+                {"role": "system", "content": self.SYSTEM_PROMPT},
+                {"role": "user",   "content": user_prompt},
+            ],
+            "max_tokens": 1024,
+            "temperature": 0.3,
+        }
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type":  "application/json",
+        }
         try:
-            # Agent.run() は async のため asyncio.run() でラップ
-            response = asyncio.run(self._agent.run(prompt))
-            return response.text or ""
-        except Exception as e:
-            return f"[LLM ERROR] {e}"
+            r = requests.post(
+                self.GROQ_API_URL,
+                json=payload,
+                headers=headers,
+                timeout=30,
+            )
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"].strip()
+        except requests.RequestException as e:
+            return f"[LLM ERROR] Groq API 呼び出し失敗: {e}"
+        except (KeyError, IndexError) as e:
+            return f"[LLM ERROR] レスポンス解析失敗: {e}"
 
 
 # ── チケット発行レート監視 ────────────────────────────────────────────────────
@@ -318,28 +373,47 @@ class TicketRateMonitor:
     def __init__(self, api: SaseApiClient):
         self.api               = api
         self._stop_event       = threading.Event()
+        # 起動時刻: これより前のログは「今回の監視期間外」として除外する
+        # ← バグ修正: 起動前の過去ログを拾って誤発火するのを防ぐ
+        self._started_at: datetime = datetime.now(timezone.utc)
         # クールダウン: アラート後 RATE_WINDOW_SEC 秒間は再発火しない
-        # 旧実装の _last_alerted_count 比較は件数減少時に再発火する問題があった
         self._last_alerted_at: float = 0.0
+        # 直前のチェックで検知済みのハッシュセット（同一セットの再発火防止）
+        self._last_alerted_hashes: frozenset = frozenset()
 
     def _parse_log_timestamp(self, ts_str: str):
+        """
+        ISO 8601 タイムスタンプをパースして timezone-aware な datetime を返す。
+
+        対応フォーマット:
+          - 2026-06-06T18:53:05.783415182+09:00  （ナノ秒精度・TZ 付き）
+          - 2026-06-06T18:53:05.783415Z           （マイクロ秒精度・UTC）
+          - 2026-06-06T18:53:05Z                  （秒精度・UTC）
+
+        修正点:
+          旧実装は "+09:00" 付きタイムスタンプを fromisoformat に渡す前に
+          ".783415182" のナノ秒部分を切り詰めていなかったため、
+          Python の fromisoformat が受け付けるマイクロ秒精度（6桁）を超えて
+          パース失敗 → None → 全エントリが除外 → count=0 で誤発火しなかった
+          はずだが、タイムゾーンオフセットの処理も不正だったため
+          実際の経過時間計算が狂っていた。
+        """
         if not ts_str:
             return None
         try:
-            if "." in ts_str:
-                base, frac = ts_str.rstrip("Z").split(".", 1)
-                frac = frac[:6].ljust(6, "0")
-                return datetime.fromisoformat(f"{base}.{frac}+00:00")
-            return datetime.strptime(
-                ts_str.rstrip("Z"), "%Y-%m-%dT%H:%M:%S"
-            ).replace(tzinfo=timezone.utc)
+            # ナノ秒→マイクロ秒へ切り詰め（Python の fromisoformat は 6 桁まで）
+            # 例: "18:53:05.783415182+09:00" → "18:53:05.783415+09:00"
+            s = re.sub(r'(\.\d{6})\d+', r'\1', ts_str)
+            # "Z" サフィックスを "+00:00" に正規化（Python 3.10 以前の互換性）
+            s = s.replace("Z", "+00:00")
+            return datetime.fromisoformat(s)  # timezone-aware で返る
         except Exception:
             return None
 
     def _check(self):
         try:
             logs_raw = self.api.get_logs()
-            logs = json.loads(logs_raw)
+            logs     = json.loads(logs_raw)
             if not isinstance(logs, list) or len(logs) == 0:
                 return
         except Exception:
@@ -348,42 +422,58 @@ class TicketRateMonitor:
         now    = datetime.now(timezone.utc)
         recent = []
         for entry in logs:
-            # 除外対象:
-            #   0x0              : 旧実装の invalidate_ticket() 呼び出し残骸（互換性のため残す）
-            #   REVOKED_AND_BLACKLISTED: revoke API のログエントリ（チケット発行ではない）
-            magic  = entry.get("magic", "").lower().strip()
-            action = entry.get("action", "")
-            if magic in ("0x0", "0x00000000", "0", "-"):
+            # 除外条件1: revoke ログ・非チケット発行エントリ
+            magic_hash = entry.get("magic_hash", "").strip()
+            action     = entry.get("action", "")
+            if magic_hash == "-":
                 continue
             if action.startswith("REVOKED_AND_BLACKLISTED"):
                 continue
+            if action != "TICKET_ISSUED":
+                continue
+
             ts = self._parse_log_timestamp(entry.get("timestamp", ""))
-            if ts and (now - ts).total_seconds() <= RATE_WINDOW_SEC:
-                recent.append(entry)
+            if ts is None:
+                continue
+
+            # 除外条件2: 起動前のログ（過去の蓄積ログによる誤発火防止）
+            # ← バグ修正ポイント
+            if ts < self._started_at:
+                continue
+
+            # 除外条件3: RATE_WINDOW_SEC より古いログ
+            if (now - ts).total_seconds() > RATE_WINDOW_SEC:
+                continue
+
+            recent.append(entry)
 
         count = len(recent)
-
         if count < RATE_LIMIT:
             return
 
-        # クールダウン中はスキップ（RATE_WINDOW_SEC 秒間は再発火しない）
+        # クールダウン: RATE_WINDOW_SEC 秒以内の再発火をスキップ
         now_ts = time.monotonic()
         if now_ts - self._last_alerted_at < RATE_WINDOW_SEC:
             return
 
-        self._last_alerted_at = now_ts
+        # 同一ハッシュセットへの重複アラートをスキップ
+        # （クールダウン明けに同じログで再発火するケースを防ぐ）
+        current_hashes = frozenset(e.get("magic_hash", "") for e in recent)
+        if current_hashes == self._last_alerted_hashes:
+            return
+
+        self._last_alerted_at     = now_ts
+        self._last_alerted_hashes = current_hashes
 
         print(f"\n{'!'*60}")
         print(f"[{now_str()}] 🚨 チケット大量発行を検知: "
               f"{RATE_WINDOW_SEC}秒以内に {count}件（閾値: {RATE_LIMIT}件）")
         for e in recent:
+            # v9.0: magic_hash を表示（平文は記録されていない）
             print(f"           [{e.get('timestamp','')}] "
-                  f"{e.get('magic','')} from {e.get('remote_ip','')}")
+                  f"hash={e.get('magic_hash','')} from {e.get('remote_ip','')}")
         print(f"{'!'*60}")
 
-        # /auth/lock でチケット発行を恒久ロック
-        # 旧実装: /auth/ticket?magic=0x0 → 「0チケット発行」にしかならず sase_agent に上書きされる
-        # 新実装: /auth/lock → 再起動まで一切のチケット発行を拒否する
         print(f"[{now_str()}] 🔒 チケット発行を恒久ロック: /auth/lock")
         lock_result = self.api.lock_ticket()
         print(f"[{now_str()}] 📡 ロック結果: {lock_result.strip()}")
@@ -414,9 +504,9 @@ class TetragonMonitor:
     REREVOKE_LOCKOUT_THRESHOLD = 2
 
     def __init__(self, api: SaseApiClient, narrator: AdminNarrator, ip_cache: dict):
-        self.api      = api
-        self.narrator = narrator
-        self.ip_cache = ip_cache
+        self.api             = api
+        self.narrator        = narrator
+        self.ip_cache        = ip_cache
         self.sigkill_counts: dict[str, int]    = {}
         self.revoked_ids: set[str]             = set()
         # docker_id → 遮断時に特定した src_ip（None = IP不明）
@@ -430,7 +520,6 @@ class TetragonMonitor:
         """
         遮断済みコンテナが再認証されているか判定する。
 
-        【修正点】
         フォールバック時（IP が特定できなかった場合）は revoked_ip[docker_id] = None。
         この場合「再認証かどうか不明」として False を返し、再遮断ループを防ぐ。
 
@@ -441,7 +530,6 @@ class TetragonMonitor:
         """
         src_ip = self.revoked_ip.get(docker_id)  # None = フォールバック時
 
-        # IP が不明な場合は再認証判定を行わない（誤検知防止）
         if src_ip is None:
             return False
 
@@ -486,26 +574,20 @@ class TetragonMonitor:
 
         if docker_id in self.revoked_ids:
             if not self._is_reauthed(docker_id):
-                # 遮断済み かつ 再認証なし（またはIP不明）→ スキップ
                 src_ip_display = self.revoked_ip.get(docker_id) or "不明"
                 print(f"  ℹ️  {docker_id[:12]} は遮断済みかつ再認証なし"
                       f"（IP: {src_ip_display}）→ スキップ")
                 return
-            # 再遮断回数をカウント
+
             self.rerevoke_counts[docker_id] = self.rerevoke_counts.get(docker_id, 0) + 1
             rerevoke_count = self.rerevoke_counts[docker_id]
             print(f"  🔄 {docker_id[:12]} の再認証を検出 → 再遮断シーケンスを実行します"
                   f"（再遮断 {rerevoke_count}回目）")
 
-            # 再遮断が閾値を超えた場合の対応
             if rerevoke_count >= self.REREVOKE_LOCKOUT_THRESHOLD:
                 if not self.ticket_locked:
-                    # /auth/lock を呼び出してチケット発行を恒久ロック
-                    # 旧実装: /auth/ticket?magic=0x0 は「0チケット発行」でしかなく
-                    #         sase_agent が直後に上書きできてしまう問題があった
-                    # 新実装: /auth/lock → Go API が再起動まで発行を完全拒否する
                     self.ticket_locked = True
-                    lock_result = self.api.lock_ticket()
+                    lock_result        = self.api.lock_ticket()
                     print(f"\n[{now_str()}] 🔐 再遮断が{rerevoke_count}回に達しました。")
                     print(f"[{now_str()}] 🔒 /auth/lock を実行しました: {lock_result.strip()}")
                     print(f"[{now_str()}] ℹ️  チケット発行はエージェント再起動まで禁止されます。")
@@ -557,12 +639,6 @@ class TetragonMonitor:
             #   linux2 は 10.0.5. サブネットを持たず SASE 認証対象外。
             #   linux2 への侵入経路は「linux1(10.0.5.x) で認証 → SSH で linux2 へ」。
             #   よって linux1 の認証を revoke することが正しい遮断手段。
-            #
-            # 対処方針:
-            #   ① /stats から「現在認証中の踏み台IP」を特定して revoke
-            #      ※ 全IP を対象にするが、これは意図的な踏み台遮断
-            #   ② revoked_ip[docker_id] = None のままにして再遮断ループは防ぐ
-            #      ただし /auth/identities で踏み台IPが再認証されたら再遮断する
 
             print(f"[{now_str()}] ⚠️  {container_name} はデータプレーンIP({DATAPLANE_SUBNET}x)を"
                   f"持ちません")
@@ -581,7 +657,6 @@ class TetragonMonitor:
                 priority_result = " / ".join(
                     f"{r['ip']}: {r.get('priority', '?')}" for r in results
                 )
-                # 踏み台IPが1つに絞れた場合は再認証チェックを有効にする
                 if len(revoked_ips) == 1:
                     self.revoked_ip[docker_id] = revoked_ips[0]
                     print(f"[{now_str()}] ✅ 踏み台遮断完了。"
@@ -589,7 +664,7 @@ class TetragonMonitor:
                 else:
                     self.revoked_ip[docker_id] = None
                     print(f"[{now_str()}] ✅ 踏み台遮断完了（複数IP）。"
-                          f"以降この コンテナの再認証チェックはスキップします。")
+                          f"以降このコンテナの再認証チェックはスキップします。")
             else:
                 revoke_result   = json.dumps(results, ensure_ascii=False)
                 priority_result = "未実施"
@@ -605,7 +680,7 @@ class TetragonMonitor:
         # ⑦ ブラックリスト確認
         print(f"[{now_str()}] 📋 ブラックリスト確認中... (/auth/blacklist)")
         blacklist_raw   = self.api.get_blacklist()
-        blacklist_state = blacklist_raw.strip() if blacklist_raw.startswith("[") else "取得失敗"
+        blacklist_state = "取得失敗"
         try:
             bl_entries = json.loads(blacklist_raw)
             if isinstance(bl_entries, list) and bl_entries:
@@ -660,7 +735,7 @@ class TetragonMonitor:
                     stderr=subprocess.PIPE,
                     text=True
                 )
-                print(f"[{now_str()}] ✅ tetragetevents ストリーム接続成功")
+                print(f"[{now_str()}] ✅ tetra getevents ストリーム接続成功")
 
                 for line in proc.stdout:
                     line = line.strip()
@@ -699,6 +774,9 @@ def main():
     if not GROQ_API_KEY:
         print("❌ GROQ_API_KEY が設定されていません")
         sys.exit(1)
+
+    if not AGENT_API_KEY:
+        print("⚠️  AGENT_API_KEY が未設定です。書き込み系 API は認証なしで動作します（開発モード）")
 
     api      = SaseApiClient()
     narrator = AdminNarrator()

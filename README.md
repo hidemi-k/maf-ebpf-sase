@@ -17,49 +17,51 @@ https://github.com/user-attachments/assets/7928db18-4297-4fdc-bc64-0882d5dfc21b
 ```
   [ Threats / Traffic ]
          │
-  ┌──────▼──────────────────────────────────────────────────┐
-  │  Data Plane: Rust + eBPF/XDP   │  Tetragon (kernel mon) │
-  └──────┬──────────────────────────────────┬───────────────┘
-         │ stats / events                   │ security events
-  ┌──────▼──────────────┐     ┌─────────────▼──────────────────────────┐
+  ┌──────▼──────────────────────────────────────────────────────────┐
+  │  Data Plane: Rust + eBPF/XDP                                    │
+  │  Tetragon (kernel syscall monitor)  Elasticsearch (log store)   │
+  └──────┬────────────────────────────────────┬─────────────────────┘
+         │ stats / XDP maps                   │ security events
+  ┌──────▼──────────────┐     ┌───────────────▼────────────────────────┐
   │  Control Plane (Go) │◄────│           MAF Orchestration            │
-  │  REST API + XDP map │     │  ┌──────────────┐  ┌────────────────┐  │
-  └─────────────────────┘     │  │ Admin agent  │  │  SASE agent    │  │
-                              │  ├──────────────┤  ├────────────────┤  │
-  ┌─────────────────────┐     │  │ Netmiko agent│  │ NETCONF+RAG    │  │
+  │  REST API           │     │  ┌──────────────┐  ┌────────────────┐  │
+  │  X-API-Key auth     │     │  │ Admin agent  │  │  SASE agent    │  │
+  └─────────────────────┘     │  ├──────────────┤  ├────────────────┤  │
+                              │  │ Tetragon mon │  │ Ticket/Policy  │  │
+  ┌─────────────────────┐     │  │ Rate monitor │  │ management     │  │
   │  Infra: Containerlab│     │  └──────────────┘  └────────────────┘  │
-  │  VPP + Juniper cRPD │     │         │  Llama-3 via Groq API        │
+  │  VPP + Juniper cRPD │     │         │  Llama-3.3-70b via Groq API  │
   └─────────────────────┘     └─────────┴──────────────────────────────┘
+                                         │
+                              ┌──────────▼──────────────────────────────┐
+                              │  A2A Protocol (next phase)              │
+                              │  a2a-ceos-core: Arista                  │
+                              └─────────────────────────────────────────┘
 ```
-
-## 🚀 Evolution of the Project
-
-This framework was developed through iterative experimentation (documented in the notebooks):
-
-- **Phase 1–5**: Evolution from simple log analysis to reactive policy enforcement.
-- **Phase 6**: Orchestrator decomposes natural language intent into a DAG of tasks and dispatches them to Workers in dependency order.
-- **Phase 7 (Current)**: Four safety boundary layers added to the Orchestrator-Worker pattern — PolicyChecker, ValidationAgent, RollbackOrchestrator, and AuditLogger — for production-grade reliability.
 
 ## 🧠 Why Microsoft Agent Framework (MAF)?
 
-All AI orchestration is unified under **MAF** (`agent_framework`). This was a deliberate architectural choice:
+All AI orchestration is unified under **MAF** (`agent_framework`):
 
-- **Native tool dispatch**: MAF automatically invokes tools from function signatures + docstrings — no manual dispatcher needed.
+- **Native tool dispatch**: MAF automatically invokes tools from function signatures + docstrings.
 - **Session & history management**: Conversation history and token limits are delegated to the MAF session layer.
-- **Unified LLM interface**: `OpenAIChatClient` with MAF's `model_id` spec works seamlessly with Groq-hosted Llama-3 models via the OpenAI-compatible API.
-- **Consistent error handling**: Rate limits, bad requests, and retries are handled by the MAF layer across all agents.
+- **Unified LLM interface**: Works seamlessly with Groq-hosted Llama-3 models via the OpenAI-compatible API.
+- **Consistent error handling**: Rate limits, bad requests, and retries are handled by the MAF layer.
 
-The same MAF-based agent pattern is used across all four modules — from low-level XDP security enforcement to high-level NETCONF/RAG configuration management.
+The same MAF-based agent pattern is used across all modules — from low-level XDP security enforcement to high-level network configuration management.
 
 ## 🛠 Tech Stack
 
 | Layer | Technology |
 |---|---|
 | **AI Orchestration** | Microsoft Agent Framework (MAF) |
-| **LLM Backend** | Llama-3 (via Groq API, OpenAI-compatible) |
+| **LLM Backend** | Llama-3.3-70b-versatile (via Groq API, OpenAI-compatible) |
 | **Data Plane** | Rust + eBPF/XDP — line-rate packet filtering |
-| **Control Plane** | Go — kernel map management & policy REST API |
+| **Control Plane** | Go — XDP map management & policy REST API |
+| **Kernel Monitor** | Tetragon (eBPF-based syscall tracing) |
+| **Log Store** | Elasticsearch (Tetragon event streaming & RAG) |
 | **Infrastructure** | Containerlab + VPP + Juniper cRPD/vevo |
+| **Multi-vendor (next)** | A2A Protocol — Arista cEOS / Cisco / Junos |
 
 ## 📁 Directory Structure
 
@@ -79,9 +81,6 @@ my-sase-project/
 │   └── xdp-ebpf/
 │       ├── Cargo.toml
 │       └── main.rs
-├── netconf-rag-maf/                          # NETCONF config generation with RAG + MAF (Jupyter)
-│   ├── netconf_rag_agent_framework.ipynb
-│   └── policy.yaml                           # NETCONF agent policy (allowed interfaces, VLANs, forbidden XML ops)
 ├── netmiko-maf/                              # Network fault diagnosis via Netmiko + MAF (Jupyter)
 │   └── network_diagnostic_agent.ipynb        # 5-agent diagnostic pipeline (L2/L3/Self-Correction)
 ├── LICENSE
@@ -101,28 +100,18 @@ my-sase-project/
         └── main.rs                           # Rust/XDP line-rate packet filter
 ```
 
+> **Removed**: `netconf-rag-maf/netconf_rag_agent_framework.ipynb`
+> In favour of the A2A-based multi-vendor approach.
+
 ### Tetragon policy
 
 `ztna-tetragon-maf/tetragon/block-shadow-access.template.yaml` is a [Tetragon](https://tetragon.io/) `TracingPolicy` that detects and blocks unauthorized access to `/etc/shadow` and `/etc/passwd` at the kernel level via eBPF.
-When Tetragon fires an event matching this policy, the **admin agent (MAF)** picks it up, reasons about the threat, and instructs the Go control plane to update the XDP drop map in real time — no human intervention required.
 
-### NETCONF operation policy
+When Tetragon fires a `KPROBE_ACTION_SIGKILL` event, the **admin agent (MAF)** picks it up, streams the event to **Elasticsearch** for evidence preservation, reasons about the threat, and instructs the Go control plane to revoke the ZTNA session and blacklist the attacker — no human intervention required.
 
-`netconf-rag-maf/policy.yaml` is a NETCONF agent policy that declaratively defines the scope of allowed operations — permitted interfaces, VLAN ID ranges, forbidden XML keywords (e.g. `delete-config`, `kill-session`), allowed `<configuration>` nodes, and max VLAN operations per run. Operational constraints can be adjusted here without touching any Python code.
+## 🔬 Orchestration: Multi-Layer Diagnostics
 
-## 🔬 Orchestration: RAG + NETCONF + Multi-Layer Diagnostics
-
-This project covers the network operations loop through two Jupyter notebooks.
-
-### [`netconf-rag-maf/`](./netconf-rag-maf/netconf_rag_agent_framework.ipynb) — Permanent remediation via NETCONF × RAG
-
-- **Why RAG?** LLMs do not have reliable knowledge of vendor-specific NETCONF schemas and CLI syntax. RAG injects the relevant device documentation at inference time, enabling accurate XML config generation for Juniper and other vendors.
-- **Why NETCONF?** NETCONF rewrites the router's running configuration directly — enabling intent-based, permanent network changes.
-- **Orchestrator-Worker pattern**: Natural language intent (e.g. *"delete VLAN70 and create VLAN100"*) is decomposed into a DAG of tasks by the Orchestrator, then dispatched to Worker agents in dependency order. Each Worker runs the full `get_inventory → translate → generate → validate → fix → deploy → audit` cycle independently.
-
-### [`netmiko-maf/`](./netmiko-maf/network_diagnostic_agent.ipynb) — Multi-layer fault diagnosis across vendors
-
-A multi-agent diagnostic system for correlating L2 and L3 state across devices. Understanding network faults requires input from multiple layers simultaneously — this notebook provides a 5-agent pipeline for that:
+### [`netmiko-maf/`](./netmiko-maf/) — Multi-layer fault diagnosis across vendors
 
 | Agent | Role |
 |---|---|
@@ -132,8 +121,12 @@ A multi-agent diagnostic system for correlating L2 and L3 state across devices. 
 | Consistency checker | Cross-validates L2/L3 state, applies Self-Correction |
 | Report generator | Produces structured findings with evidence citations |
 
-- **Multi-vendor by design**: `VENDOR_KEY` decouples the SSH driver (`netmiko_driver`) from the command dictionary — adding a new device type requires only a YAML entry, no code changes.
+- **Multi-vendor by design**: `VENDOR_KEY` decouples the SSH driver from the command dictionary — adding a new device type requires only a YAML entry.
 - **Mock mode**: All agents run against mock data without physical devices, enabling CI/CD-friendly testing.
+
+## 🔗 A2A Migration (Next Phase)
+
+The NETCONF RAG notebook has been deprecated. The replacement is an **A2A (Agent-to-Agent) protocol**-based architecture implemented in [`a2a-ceos-core`](https://github.com/hidemi-k/a2a-ceos-core):
 
 ## 🏁 Getting Started
 
@@ -154,53 +147,55 @@ A multi-agent diagnostic system for correlating L2 and L3 state across devices. 
     sudo containerlab deploy -t infra/containerlab/vpp.clab.yml
     ```
 
-2. **Setup API Key**:
+2. **Setup API Keys**:
     ```bash
     cp config.ini.example config.ini
     # Edit config.ini and set GROQ_API_KEY
     ```
-    Or use the environment variable:
+    Optional — enable write API authentication:
     ```bash
-    export SASE_CONFIG=/path/to/config.ini
+    export AGENT_API_KEY=$(openssl rand -hex 32)
     ```
 
-3. **Launch Go Control Plane**:
+3. **Build and Launch Go Control Plane**:
     ```bash
-    cd ztna-tetragon-maf/go-control-plane && go run main.go
+    cd ztna-tetragon-maf/xdp-ebpf
+    cargo build --release
+    cp target/bpfel-unknown-none/release/xdp-ebpf ../go-control-plane/main.o
+    cd ../go-control-plane
+    sudo nsenter -t $PID -n ./sase-agent -iface eth3 -xdp-mode generic
     ```
 
 4. **Run the MAF Agents**:
     ```bash
-    # Security admin agent (Tetragon event monitoring + XDP enforcement)
     python3 ztna-tetragon-maf/python-agents/admin_agent_maf.py
-
-    # User-facing SASE agent (ticket & policy management)
     python3 ztna-tetragon-maf/python-agents/sase_agent_maf.py
+    python3 ips-maf/python-agents/sase_agent.py
     ```
 
 5. **Explore the Notebooks**:
-    - [`netmiko-maf/`](./netmiko-maf/) — Network diagnostics and automation powered by MAF agents
-    - [`netconf-rag-maf/`](./netconf-rag-maf/) — NETCONF config generation with RAG + MAF orchestration
+    - [`netmiko-maf/`](./netmiko-maf/) — Network diagnostics powered by MAF agents
 
-> The NETCONF×RAG module is also available as a standalone NiceGUI app:
+> The NETCONF×RAG GUI app is available separately:
 > [maf-netconf-rag-gui](https://github.com/hidemi-k/maf-netconf-rag-gui)
 
 ## ⚠️ Known Limitations
 
-### MAF Native HITL: Tool Call Instability with Open Models via Groq
+### MAF: asyncio ContextVar in Synchronous Threads
 
-The IPS module (`ips-maf/python-agents/sase_agent.py`) implements human-in-the-loop (HITL)
-using a custom `[EXEC:]` tag parsing approach rather than MAF's native `approval_mode="always_require"` API.
+When calling `Agent.run()` from a synchronous thread via `asyncio.run()`, MAF may raise:
 
-An attempt was made to migrate to the MAF-native HITL, but it was reverted because
-`llama-3.3-70b-versatile` and `openai/gpt-oss-120b` (both via Groq) do not reliably generate
-tool call JSON in this context — they tend to return plain text instead of invoking tools.
+```
+ContextVar was created in a different Context
+```
 
-MAF's HITL mechanism itself is correctly designed. The limitation lies in the model,
-not in the framework. Using MAF-native HITL requires a model with stable tool calling support
-such as Claude (officially supported by MAF).
+This project works around it by replacing `asyncio.run(Agent.run())` with direct `requests.post()` to the Groq API for non-interactive LLM calls (`AdminNarrator`, `FWAnalyst`). Interactive chat (`sase_agent_maf.py`) uses `asyncio.run(chat_loop())` → `await agent.run()` and is unaffected.
 
-See [Issue #2](https://github.com/hidemi-k/maf-ebpf-sase/issues/2) for details and test results.
+### MAF Native HITL: Tool Call Instability with Open Models
+
+The IPS module implements human-in-the-loop (HITL) using a custom `[EXEC:]` tag parsing approach rather than MAF's native `approval_mode="always_require"` API.
+
+`llama-3.3-70b-versatile` via Groq does not reliably generate tool call JSON in MAF's HITL context. MAF's HITL mechanism is correctly designed; the limitation lies in the model. Using MAF-native HITL requires a model with stable tool calling support such as Claude.
 
 ## 📄 License
 
