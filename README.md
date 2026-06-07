@@ -19,7 +19,7 @@ https://github.com/user-attachments/assets/7928db18-4297-4fdc-bc64-0882d5dfc21b
          │
   ┌──────▼──────────────────────────────────────────────────────────┐
   │  Data Plane: Rust + eBPF/XDP                                    │
-  │  Tetragon (kernel syscall monitor)  Elasticsearch (log store)   │
+  │  Tetragon (kernel syscall monitor)                              │
   └──────┬────────────────────────────────────┬─────────────────────┘
          │ stats / XDP maps                   │ security events
   ┌──────▼──────────────┐     ┌───────────────▼────────────────────────┐
@@ -59,7 +59,6 @@ The same MAF-based agent pattern is used across all modules — from low-level X
 | **Data Plane** | Rust + eBPF/XDP — line-rate packet filtering |
 | **Control Plane** | Go — XDP map management & policy REST API |
 | **Kernel Monitor** | Tetragon (eBPF-based syscall tracing) |
-| **Log Store** | Elasticsearch (Tetragon event streaming & RAG) |
 | **Infrastructure** | Containerlab + VPP + Juniper cRPD/vevo |
 | **Multi-vendor (next)** | A2A Protocol — Arista cEOS / Cisco / Junos |
 
