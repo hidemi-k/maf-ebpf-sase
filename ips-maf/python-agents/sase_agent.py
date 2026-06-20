@@ -72,7 +72,7 @@ if os.path.exists(GROQ_CONFIG_PATH):
 
 SASE_API_URL = os.getenv("SASE_API_URL", "http://localhost:8080")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", groq_api_key)
-MODEL        = "llama-3.3-70b-versatile"
+MODEL        = "openai/gpt-oss-120b"
 
 # Groq API エンドポイント（FWAnalyst が直接呼び出す）
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"

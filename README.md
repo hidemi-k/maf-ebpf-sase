@@ -30,7 +30,7 @@ https://github.com/user-attachments/assets/7928db18-4297-4fdc-bc64-0882d5dfc21b
                               │  │ Tetragon mon │  │ Ticket/Policy  │  │
   ┌─────────────────────┐     │  │ Rate monitor │  │ management     │  │
   │  Infra: Containerlab│     │  └──────────────┘  └────────────────┘  │
-  │  VPP + Juniper cRPD │     │         │  Llama-3.3-70b via Groq API  │
+  │  VPP + Juniper cRPD │     │         │  GPT-OSS-120B via Groq API  │
   └─────────────────────┘     └─────────┴──────────────────────────────┘
                                          │
                               ┌──────────▼──────────────────────────────┐
@@ -45,7 +45,7 @@ All AI orchestration is unified under **MAF** (`agent_framework`):
 
 - **Native tool dispatch**: MAF automatically invokes tools from function signatures + docstrings.
 - **Session & history management**: Conversation history and token limits are delegated to the MAF session layer.
-- **Unified LLM interface**: Works seamlessly with Groq-hosted Llama-3 models via the OpenAI-compatible API.
+- **Unified LLM interface**: Works seamlessly with Groq-hosted models via the OpenAI-compatible API.
 - **Consistent error handling**: Rate limits, bad requests, and retries are handled by the MAF layer.
 
 The same MAF-based agent pattern is used across all modules — from low-level XDP security enforcement to high-level network configuration management.
@@ -55,7 +55,7 @@ The same MAF-based agent pattern is used across all modules — from low-level X
 | Layer | Technology |
 |---|---|
 | **AI Orchestration** | Microsoft Agent Framework (MAF) |
-| **LLM Backend** | Llama-3.3-70b-versatile (via Groq API, OpenAI-compatible) |
+| **LLM Backend** | openai/gpt-oss-120b (via Groq API, OpenAI-compatible) |
 | **Data Plane** | Rust + eBPF/XDP — line-rate packet filtering |
 | **Control Plane** | Go — XDP map management & policy REST API |
 | **Kernel Monitor** | Tetragon (eBPF-based syscall tracing) |

@@ -3,7 +3,7 @@
 # See LICENSE file in the project root for full license information.
 
 """
-SASE Admin Agent (Groq / llama-3.3-70b-versatile)
+SASE Admin Agent
 
 変更履歴:
   [v9.0 対応]
@@ -62,7 +62,7 @@ if os.path.exists(GROQ_CONFIG_PATH):
 SASE_API_URL       = os.getenv("SASE_API_URL",   "http://localhost:8080")
 GROQ_API_KEY       = os.getenv("GROQ_API_KEY",   groq_api_key)
 AGENT_API_KEY      = os.getenv("AGENT_API_KEY",  "")  # 書き込み系 API の認証キー
-MODEL              = "llama-3.3-70b-versatile"
+MODEL              = "openai/gpt-oss-120b"
 TETRAGON_CONTAINER = "tetragon1"
 DATAPLANE_SUBNET   = "10.0.5."
 SIGKILL_THRESHOLD  = 2

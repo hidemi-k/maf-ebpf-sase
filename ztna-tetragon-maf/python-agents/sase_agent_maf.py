@@ -3,7 +3,7 @@
 # See LICENSE file in the project root for full license information.
 
 """
-SASE Agent (Groq / llama-3.3-70b-versatile)
+SASE Agent
 
 変更履歴:
   [v9.0 対応]
@@ -65,7 +65,7 @@ else:
 SASE_API_URL   = os.getenv("SASE_API_URL",   "http://localhost:8080")
 GROQ_API_KEY   = os.getenv("GROQ_API_KEY",   groq_api_key)
 AGENT_API_KEY  = os.getenv("AGENT_API_KEY",  "")  # 書き込み系 API の認証キー
-MODEL          = "llama-3.3-70b-versatile"
+MODEL          = "openai/gpt-oss-120b"
 CONTAINER_NAME = "linux1"
 
 # AGENT_API_KEY が未設定の場合は開発モードで動作する
@@ -405,7 +405,7 @@ async def chat_loop(agent: Agent):
 
     os.system("clear")
     print("=" * 60)
-    print("  SASE Agent (Groq / llama-3.3-70b-versatile)")
+    print("  SASE Agent")
     print("  終了: 'exit' または 'quit'")
     print("=" * 60)
     print()
@@ -439,7 +439,7 @@ async def chat_loop(agent: Agent):
             break
 
         print()
-        # llama はツール呼び出しの JSON 生成に失敗することがある（400 エラー）。
+        # llm はツール呼び出しの JSON 生成に失敗することがある（400 エラー）。
         # 同じ入力でリトライすることで大半は回復するため、最大2回まで再試行する。
         MAX_RETRY = 2
         for attempt in range(MAX_RETRY + 1):
