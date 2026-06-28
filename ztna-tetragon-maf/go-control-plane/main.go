@@ -143,14 +143,34 @@ func mustParseDuration(envKey string, d time.Duration) time.Duration {
 // ---------------------------------------------------------------------------
 
 // agentAPIKey は環境変数 AGENT_API_KEY から読む。
-// 空の場合はミドルウェアを無効化し、起動時に警告を出す。
+// 空の場合は書き込み系 API をローカルホストからのみ許可する（開発モード）。
 var agentAPIKey = os.Getenv("AGENT_API_KEY")
 
 // authMiddleware は書き込み系エンドポイントに適用するトークン認証。
-// AGENT_API_KEY が未設定の場合はすべてのリクエストを許可する（開発環境向け）。
+//
+// 動作モード:
+//   AGENT_API_KEY 設定済み: X-API-Key ヘッダが一致しなければ 401 を返す。
+//   AGENT_API_KEY 未設定  : localhost (127.0.0.1 / ::1) からのみ許可する（開発モード）。
+//                           それ以外のリモートからは 403 を返す。
+//
+// fix ③: 旧実装は未設定時に全リクエストを無条件許可していた。
+// 本番環境で環境変数の設定漏れがあっても外部からの書き込みを防ぐため、
+// localhost 限定フォールバックに変更。
 func authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if agentAPIKey == "" {
+			// 開発モード: localhost からのアクセスのみ許可
+			host, _, err := net.SplitHostPort(r.RemoteAddr)
+			if err != nil {
+				http.Error(w, "Forbidden (dev mode: cannot parse remote addr)", http.StatusForbidden)
+				log.Printf("⚠️  Dev mode: cannot parse RemoteAddr=%s path=%s", r.RemoteAddr, r.URL.Path)
+				return
+			}
+			if host != "127.0.0.1" && host != "::1" {
+				http.Error(w, "Forbidden (dev mode: write APIs are localhost-only; set AGENT_API_KEY for remote access)", http.StatusForbidden)
+				log.Printf("🔒 Dev mode: blocked non-localhost write: remote=%s path=%s", r.RemoteAddr, r.URL.Path)
+				return
+			}
 			next(w, r)
 			return
 		}
@@ -194,7 +214,7 @@ func main() {
 	currentMode  = xdpMode
 
 	if agentAPIKey == "" {
-		log.Printf("⚠️  AGENT_API_KEY is not set — write APIs are unprotected (dev mode)")
+		log.Printf("⚠️  AGENT_API_KEY is not set — write APIs are restricted to localhost only (dev mode)")
 	} else {
 		log.Printf("✅ API key authentication enabled")
 	}
@@ -344,10 +364,15 @@ func runDefenseLoop(sMap *ebpf.Map, aMap *ebpf.Map) {
 			currentSyn := stats.SynPackets
 			prevSyn    := prevSynCounts[key]
 
-			delta := currentSyn - prevSyn
+			// fix ⑥: カウンタロールオーバー検出時はその周期をスキップする。
+			// 旧実装は delta = currentSyn（累積値）としていたため、
+			// リセット直後に大きな delta が入り誤検知の恐れがあった。
+			// スキップにより誤検知を防ぎ、次の周期から正常に差分計測を再開する。
 			if currentSyn < prevSyn {
-				delta = currentSyn // カウンタロールオーバー対策
+				prevSynCounts[key] = currentSyn
+				continue
 			}
+			delta := currentSyn - prevSyn
 
 			if delta > 300 {
 				alertCounts[key]++
